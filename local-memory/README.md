@@ -197,14 +197,24 @@ node scripts/bench-embedding.mjs     # 嵌入模型/语言方案的召回对比�
 
 > 想彻底不受仓库影响：把整个 `local-memory/` 移到仓库外（例如 `E:\tools\local-memory`），再跑一次 `install-cursor.mjs`。它不依赖仓库里的任何文件。
 
+**给仓库加了、换了或删了 git remote 之后**：仓库标识会跟着变（有 remote 用 `owner/repo`，没有则用目录名加路径哈希），已有记忆仍带着旧标识，在新标识下搜不到也不会注入。用一次性脚本把它们迁过去，默认只报告不改动：
+
+```powershell
+node scripts/rekey-project.mjs                                 # 列出库里所有仓库标识及条数
+node scripts/rekey-project.mjs --from <旧标识>                  # 先看会动哪些
+node scripts/rekey-project.mjs --from <旧标识> --yes            # 确认后执行
+```
+
+不带参数就是清单模式——`list` 和 `stats` 显示的都是仓库**名**（目录名，每个 clone 都一样），只有这里能看到真正的标识。迁移只改 `metadata.project`，id、日期、kind、过期时间都不动，所以把 `--from` 和 `--to` 对调就能撤回；`--to` 不给时取当前目录所属仓库，因此要在仓库根目录跑（在 `local-memory/` 里跑会被拦下来）。
+
 **升级 mem0 记忆引擎本身**（与本仓库无关，走 npm）：
 
 ```powershell
 npm install mem0ai@latest      # 或指定版本
-node scripts/smoke-test.mjs    # 验证；异常就 npm install mem0ai@3.1.5 回退
+node scripts/smoke-test.mjs    # 验证；异常就 npm install mem0ai@3.1.6 回退
 ```
 
-`package.json` 里锁的是 `mem0ai@^3.1.5`；跨大版本升级前先看上游 migration guide，尤其注意存储格式与 `search`/`getAll` 的参数约定，以及 [DESIGN.md 的「上游 mem0 的已知问题」](DESIGN.md#上游-mem0-的已知问题)那张表里还成不成立。
+`package.json` 里锁的是 `mem0ai@^3.1.6`；跨大版本升级前先看上游 migration guide，尤其注意存储格式与 `search`/`getAll` 的参数约定，以及 [DESIGN.md 的「上游 mem0 的已知问题」](DESIGN.md#上游-mem0-的已知问题)那张表里还成不成立。
 
 ⚠️ **升级 `fastembed` 或 `@huggingface/transformers` 之后，先确认 `overrides` 里的 `onnxruntime-node` 仍然对两者都成立**（两个原生 ONNX 运行时共存会让进程直接崩掉，没有任何 JavaScript 异常，原因见 [DESIGN.md 的「第四路：重排」](DESIGN.md#第四路重排)末尾）：
 
