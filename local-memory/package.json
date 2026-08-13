@@ -1,0 +1,44 @@
+{
+  "name": "mem0-local-memory",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local memory layer for Cursor, built on the mem0ai npm package. Memories never leave the machine; summarisation runs through the Cursor CLI. No Docker, no Python.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "doctor": "node src/cli.mjs doctor",
+    "add": "node src/cli.mjs add",
+    "search": "node src/cli.mjs search",
+    "list": "node src/cli.mjs list",
+    "stats": "node src/cli.mjs stats",
+    "install-cursor": "node scripts/install-cursor.mjs",
+    "uninstall-cursor": "node scripts/install-cursor.mjs --uninstall",
+    "install-watchdog": "node scripts/install-watchdog.mjs",
+    "uninstall-watchdog": "node scripts/install-watchdog.mjs --uninstall",
+    "install-sweeper": "node scripts/install-sweeper.mjs",
+    "uninstall-sweeper": "node scripts/install-sweeper.mjs --uninstall",
+    "watch": "node src/cli.mjs watch",
+    "smoke": "node scripts/smoke-test.mjs",
+    "test:health": "node scripts/test-health.mjs",
+    "test:mcp": "node scripts/test-mcp.mjs",
+    "test:hooks": "node scripts/test-hooks.mjs",
+    "test:llm": "node scripts/test-llm.mjs",
+    "test:injection": "node scripts/test-injection.mjs",
+    "test:retrieval": "node scripts/test-retrieval.mjs",
+    "test:cli": "node scripts/test-cli.mjs",
+    "probe:prompt": "node scripts/probe-prompt-size.mjs"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
+    "@langchain/core": "^1.2.5",
+    "@modelcontextprotocol/sdk": "^1.25.4",
+    "better-sqlite3": "^12.6.2",
+    "fastembed": "^2.1.0",
+    "mem0ai": "^3.1.5"
+  },
+  "overrides": {
+    "onnxruntime-node": "1.24.3"
+  }
+}
