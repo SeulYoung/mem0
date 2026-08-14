@@ -4,20 +4,20 @@
  * It fires on every prompt the user sends, so recording does not depend on the
  * agent deciding to call a tool.
  *
- * The prompt is queued and handed to a detached worker, then the hook answers
- * immediately: embedding must never sit between the user and their request.
+ * With `capture.includeResponse` on, the prompt is parked as a turn in flight and
+ * written only once the turn ends (`stop`), together with the agent's reply. Off,
+ * or with no conversation id to pair on, it goes straight to a detached worker.
+ * Either way the hook answers immediately: embedding must never sit between the
+ * user and their request.
  */
-import crypto from "node:crypto";
-import { spawn } from "node:child_process";
-import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { loadConfig } from "../config.mjs";
 import { isNestedAgentInvocation, isNestedAgentWorkspace } from "../llm.mjs";
-import { PATHS, ensureDirs, log } from "../paths.mjs";
+import { ensureDirs, log } from "../paths.mjs";
 import { projectFromHookPayload } from "../project.mjs";
 import { guardDeadline, readStdinJson, respond } from "./_hook-io.mjs";
+import { beginTurn, flushTurn, queueJob, turnFile } from "./_turn-store.mjs";
 
 const PROCEED = { continue: true };
 guardDeadline(4000, PROCEED);
@@ -27,6 +27,7 @@ try {
   const config = loadConfig();
   const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
   const project = projectFromHookPayload(payload);
+  const file = turnFile(payload.conversation_id);
 
   const skip = (() => {
     // Capturing here would store the extraction prompt and trigger another
@@ -45,21 +46,27 @@ try {
   }
 
   ensureDirs();
-  const queueFile = path.join(PATHS.queueDir, `${Date.now()}-${crypto.randomBytes(4).toString("hex")}.json`);
-  fs.writeFileSync(
-    queueFile,
-    JSON.stringify({
-      text: prompt.slice(0, config.capture.maxChars),
-      projectRoot: project.root,
-      conversationId: payload.conversation_id ?? null,
-      queuedAt: new Date().toISOString(),
-    }),
-  );
+  const text = prompt.slice(0, config.capture.maxChars);
 
-  const worker = path.join(path.dirname(fileURLToPath(import.meta.url)), "capture-worker.mjs");
-  spawn(process.execPath, [worker, queueFile], { detached: true, stdio: "ignore" }).unref();
+  // A turn still parked from the previous prompt never got its `stop`. Writing it
+  // now, from whatever it collected, is the difference between "recorded late"
+  // and "never recorded".
+  flushTurn(file, "superseded by a new prompt");
 
-  log("capture", `queued ${path.basename(queueFile)} project=${project.id} chars=${prompt.length}`);
+  if (config.capture.includeResponse !== false && file) {
+    beginTurn({ file, text, projectRoot: project.root, conversationId: payload.conversation_id ?? null });
+    log("capture", `turn started ${path.basename(file)} project=${project.id} chars=${prompt.length}`);
+    respond(PROCEED);
+  }
+
+  const queued = queueJob({
+    prompt: text,
+    responses: [],
+    projectRoot: project.root,
+    conversationId: payload.conversation_id ?? null,
+    queuedAt: new Date().toISOString(),
+  });
+  log("capture", `queued ${path.basename(queued)} project=${project.id} chars=${prompt.length}`);
   respond(PROCEED);
 } catch (error) {
   log("capture", `hook error (prompt still submitted): ${error.stack ?? error.message}`);

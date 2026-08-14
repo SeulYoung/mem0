@@ -15,6 +15,7 @@ import { routeConsoleToStderr } from "../memory.mjs";
 import { log } from "../paths.mjs";
 import { projectFromHookPayload } from "../project.mjs";
 import { guardDeadline, readStdinJson, respond } from "./_hook-io.mjs";
+import { flushStaleTurns } from "./_turn-store.mjs";
 
 routeConsoleToStderr();
 
@@ -28,6 +29,13 @@ if (isNestedAgentInvocation()) respond(EMPTY);
 try {
   const payload = await readStdinJson();
   const config = ensureConfigFile();
+
+  // Turns whose `stop` never arrived, most likely because the window was closed
+  // mid-answer. This hook runs while nothing else is in flight, which makes it
+  // the natural place to notice — and a prompt left parked is a memory silently
+  // not taken. Spawning a worker per stale turn costs nothing here.
+  const stale = flushStaleTurns((config.capture?.turnTimeoutMinutes ?? 120) * 60 * 1000);
+  if (stale > 0) log("session-start", `flushed ${stale} unfinished turn(s)`);
 
   if (!config.inject.enabled || config.inject.hookContext === false) respond(EMPTY);
 

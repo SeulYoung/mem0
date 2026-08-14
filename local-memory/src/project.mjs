@@ -2,7 +2,14 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-export const GLOBAL_SCOPE = "global";
+/**
+ * The id is handed to mem0 as `agent_id`, which it refuses if it contains
+ * whitespace — and a folder named "My Project" would otherwise mint one. Folded
+ * here, at the single place an id is minted, so no caller has to remember.
+ */
+export function asEntityId(value) {
+  return value.replace(/\s+/g, "-");
+}
 
 function readGitRemote(root) {
   // Parsed by hand so this works without a git binary on PATH.
@@ -47,7 +54,9 @@ export function resolveProject(explicitRoot) {
   const name = path.basename(root) || root;
   const remote = readGitRemote(root);
   const slug = remote ? slugFromRemote(remote) : null;
-  const id = slug || `${name.toLowerCase()}-${crypto.createHash("sha1").update(root.toLowerCase()).digest("hex").slice(0, 8)}`;
+  const id = asEntityId(
+    slug || `${name.toLowerCase()}-${crypto.createHash("sha1").update(root.toLowerCase()).digest("hex").slice(0, 8)}`,
+  );
   return { id, name, root, remote: remote ?? null };
 }
 

@@ -36,8 +36,8 @@ export const MEMORY_PROTOCOL = [
  * The memories that fit, rendered as the lines they will be injected as.
  *
  * Exported on its own because the budget is where injection quietly loses
- * memories, and reproducing that here through the store would be at the mercy
- * of whatever global memories happen to share the same slots.
+ * memories, and a test that went through the store instead would be at the
+ * mercy of whatever the repository happens to hold.
  */
 export function selectInjectionLines(records, { recent, maxChars }) {
   const lines = [];

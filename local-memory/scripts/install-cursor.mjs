@@ -4,7 +4,8 @@
  * project gets it without per-repository setup:
  *
  *   ~/.cursor/mcp.json    -> the mem0-local MCP server (agent-driven read/write)
- *   ~/.cursor/hooks.json  -> sessionStart injection + beforeSubmitPrompt capture
+ *   ~/.cursor/hooks.json  -> sessionStart injection + turn capture across three
+ *                            events (beforeSubmitPrompt / afterAgentResponse / stop)
  *
  * Both files are merged, not overwritten: existing servers and hooks are kept,
  * a timestamped backup is written, and re-running changes nothing. Pass
@@ -80,9 +81,14 @@ function updateHooks() {
   config.version ??= 1;
   config.hooks ??= {};
 
+  // afterAgentResponse and stop are the two halves of turn capture: the first
+  // collects the agent's replies, the second is what actually writes the turn.
+  // Both are cheap and neither blocks the agent loop.
   const desired = {
     sessionStart: { command: `node "${posix("src", "hooks", "session-start.mjs")}"`, timeout: 10 },
     beforeSubmitPrompt: { command: `node "${posix("src", "hooks", "before-submit-prompt.mjs")}"`, timeout: 8 },
+    afterAgentResponse: { command: `node "${posix("src", "hooks", "after-agent-response.mjs")}"`, timeout: 8 },
+    stop: { command: `node "${posix("src", "hooks", "stop.mjs")}"`, timeout: 8 },
   };
 
   let changed = false;
@@ -107,7 +113,7 @@ function updateHooks() {
 
   if (!changed) return log(`hooks.json: already ${uninstall ? "clean" : "up to date"}`);
   writeJson(hooksFile, config);
-  log(`hooks.json: ${uninstall ? "removed" : "registered"} sessionStart + beforeSubmitPrompt`);
+  log(`hooks.json: ${uninstall ? "removed" : "registered"} ${Object.keys(desired).join(" + ")}`);
 }
 
 updateMcp();

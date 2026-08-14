@@ -2,24 +2,34 @@
 /**
  * Connects to the local MCP server the same way Cursor does (stdio + real MCP
  * handshake) and exercises every tool. Run after changing mcp-server.mjs.
+ *
+ * Also covers the two things the server does for hosts that run no hooks at all:
+ * carrying the memory injection in the handshake, and claiming turns that were
+ * left unfinished.
  */
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
+import { PATHS } from "../src/paths.mjs";
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const serverPath = path.join(here, "..", "src", "mcp-server.mjs");
 const projectDir = process.argv[2] ?? path.join(here, "..");
 
-async function connect() {
+async function connect(env) {
   const client = new Client({ name: "mem0-local-test", version: "0.1.0" });
   await client.connect(
     new StdioClientTransport({
       command: process.execPath,
       args: [serverPath, "--project-dir", projectDir],
       stderr: "inherit",
+      // Inherited by anything the server spawns, which is how the detached
+      // capture worker below is reached.
+      ...(env ? { env: { ...process.env, ...env } } : {}),
     }),
   );
   return client;
@@ -72,6 +82,15 @@ show("purged leftovers", await purge());
 const added = await call("memory_add", { text: FIXTURE, kind: "convention" });
 show("memory_add", added);
 if (added.stored !== 1) throw new Error(`memory_add stored ${added.stored} records, expected 1`);
+
+// A write is scoped by mem0's own `agent_id`, and every read filters on it, so a
+// mismatch here would not fail loudly — the memory would simply never be found
+// again from the repository that stored it.
+const listing = await call("memory_list", { limit: 50 });
+const storedHere = listing.results.find((record) => record.id === added.ids[0]);
+if (storedHere?.project !== listing.project) {
+  throw new Error(`the stored memory is scoped to "${storedHere?.project}", not to this repository (${listing.project})`);
+}
 
 // mem0 compares content hashes only on its extraction path; the verbatim path
 // this tool uses by default has no such check, so the duplicate guard has to
@@ -147,17 +166,6 @@ await call("memory_delete", { id: shortLived.ids[0] });
 const missing = await client.callTool({ name: "memory_update", arguments: { id: "zzzzzzzz", text: "x" } });
 if (!missing.isError) throw new Error("an id that matches nothing must be reported as an error, not ignored");
 
-// Re-adding under the other scope would mint a new id and a new date, which is
-// exactly what the injected list is keyed on.
-const promoted = await call("memory_update", { id: shortId, scope: "global" });
-show("memory_update (moved to global scope)", { id: promoted.id, project: promoted.project });
-if (promoted.project !== "global") throw new Error("the memory was not moved to global scope");
-if (promoted.id !== added.ids[0] || promoted.createdAt !== before.createdAt) {
-  throw new Error("moving scope must keep the id and the original date");
-}
-const demoted = await call("memory_update", { id: shortId, scope: "project" });
-if (demoted.project !== before.project) throw new Error("the memory did not come back to this repository");
-
 // --- expiry ------------------------------------------------------------------
 const expired = await call("memory_update", { id: shortId, expiresAt: "2020-01-01" });
 show("memory_update (expiry in the past)", expired);
@@ -181,6 +189,41 @@ if (revived.expiresAt) throw new Error("expiresAt: null must clear the expiry");
 if (!(await call("memory_list", { limit: 50 })).results.some((record) => record.id === added.ids[0])) {
   throw new Error("clearing the expiry must bring the memory back");
 }
+
+// --- claiming an unfinished turn ---------------------------------------------
+// The hooks that normally claim a parked turn only run in Cursor, so the server
+// claims stale ones too — otherwise a turn abandoned in Cursor would wait for the
+// next Cursor session however long you spend in an ACP host. The model is turned
+// off for this one server: the assertion is that *this* turn reached the store,
+// which means comparing stored text to the prompt verbatim, and a turn this size
+// is worth an extraction now that the reply counts towards `inferMinChars` too.
+const STALE = "MCP 自检记忆：没结束的轮次";
+const staleTurn = path.join(PATHS.turnsDir, "mcp-test-stale.ndjson");
+fs.mkdirSync(PATHS.turnsDir, { recursive: true });
+fs.writeFileSync(
+  staleTurn,
+  `${JSON.stringify({ t: "prompt", text: STALE, projectRoot: projectDir, conversationId: "mcp-test-stale" })}\n` +
+    `${JSON.stringify({ t: "response", text: "这一半会被丢掉，因为回落原文时只存 prompt。" })}\n`,
+);
+const longAgo = new Date(Date.now() - 48 * 60 * 60 * 1000);
+fs.utimesSync(staleTurn, longAgo, longAgo);
+
+const claimer = await connect({ MEM0_LOCAL_NO_LLM: "1" });
+await claimer.close();
+show("stale turn claimed at server startup", !fs.existsSync(staleTurn));
+if (fs.existsSync(staleTurn)) {
+  fs.unlinkSync(staleTurn);
+  throw new Error("starting the server left an abandoned turn parked, so its prompt is a memory never taken");
+}
+
+let claimed = null;
+for (let attempt = 0; attempt < 20 && !claimed; attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  claimed = (await call("memory_list", { limit: 50 })).results.find((record) => record.text === STALE);
+}
+show("and written by the detached worker", claimed);
+if (!claimed) throw new Error("the claimed turn never reached the store");
+await call("memory_delete", { id: claimed.id });
 
 show("memory_search", await call("memory_search", { query: "本地记忆层放在哪里", topK: 3 }));
 show("memory_list", await call("memory_list", { limit: 3 }));

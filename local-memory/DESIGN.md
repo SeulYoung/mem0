@@ -11,7 +11,8 @@
 | 用 npm 上的 `mem0ai` 包，而不是引用本仓库源码 | 运行时与仓库解耦：仓库怎么升级、甚至整个删掉重下，都不影响这套记忆系统 |
 | 不用 `server/` 的 Docker 自托管栈 | 这台机器没有 Docker/Python；且那个栈的 LLM/嵌入只内置 openai/anthropic/gemini，要接本地模型必须改 `server/main.py`——那是上游文件，会被升级冲掉 |
 | 总结模型只在后台捕获时调用，MCP 写入默认不调 | 抽取一次约 15 秒。后台进程里没人等它，这笔时间是免费的；而 AI 调 `memory_add` 时交上来的已经是一句干净事实，再过一遍模型只会让工具调用卡住 15 秒 |
-| hooks 负责"一定会记"，MCP 负责"记得好" | hooks 是确定性的，不依赖模型是否想起来调工具；MCP 让 AI 主动写入提炼后的高质量记忆 |
+| hooks 负责"一定会记"，MCP 负责"记得好" | hooks 是确定性的，不依赖模型是否想起来调工具；MCP 让 AI 主动写入提炼后的高质量记忆（分工见[两路写入](#两路写入hook-与-mcp)） |
+| hook 捕获的单位是一轮对话，不是一条 prompt | 结论通常在回答里而不是问题里；而 mem0 的 `add()` 本来就收 `Message[]`，所以配对是零额外配额的——每轮仍然只有一次抽取 |
 | 会话注入同时走 hook 和 MCP 握手两条通道 | hooks 只有 Cursor 自己执行，ACP 宿主（JetBrains 等）一条都不跑；MCP 的 `instructions` 两边都到得了 |
 | 巡检靠**主动起一次服务**，不靠心跳超时 | 心跳只在你开新会话时才跳，"一下午没聊天"和"服务已经死了"长得一模一样。主动探活跟你活不活跃无关，也就没有误报 |
 | 巡检跑在 IDE 之外的独立 node 上 | IDE 自带的运行时正是被监控对象之一；跟着被监控对象一起死的看门狗不算看门狗 |
@@ -99,9 +100,47 @@ mem0 的事实抽取
 
 **为什么需要第二条：ACP 宿主根本不执行 Cursor 的 hooks。** 在 CLion 2026.2 里用 `cursor-agent acp` 手工建会话、发 prompt，日志里既没有 `[session-start]` 也没有 `[capture]`——hook 引擎明明打包在 CLI 里、`~/.cursor/hooks.json` 也有效，就是不被调用；而 `~/.cursor/mcp.json` 里的 MCP server 每个会话照常启动。第二条通道是拿一个临时 MCP server 在 `instructions` 里埋魔术串、让模型原样报出来验证的（`test-mcp.mjs` 里有一条用例守着：先写一条记忆，再开一个连接，断言它出现在新连接的 `instructions` 里）。
 
-两个代价：**在 Cursor 里同一份记忆会进两次上下文**（各不超过 `inject.maxChars`），确定主力宿主后关掉一条即可；**自动捕获 prompt 只有 hook 一条路**，ACP 宿主下只能靠 AI 自己调 `memory_add`，要补齐得在 IDE 和 agent 之间插一个 ACP stdio 代理（JetBrains 支持在 `~/.jetbrains/acp.json` 里自定义 agent 命令），尚未实现。
+两个代价：**在 Cursor 里同一份记忆会进两次上下文**（各不超过 `inject.maxChars`），确定主力宿主后关掉一条即可；**自动捕获只有 hook 一条路**，ACP 宿主下只能靠 AI 自己调 `memory_add`（见[宿主差异](#宿主差异cursor-与-acp-宿主)）。
 
 **选哪几条：按时间取 `recent` 条，装不下的跳过。** 排序只有"新"这一个标准，所以一条纲领性约定会被当天的零碎发现挤下去——它天生是旧的。**注入不是全部记忆，AI 开工前仍要 `memory_search`**，协议文本里就是这么要求的；实测一条排在第 15 位、根本没进注入的原则，用四种自然问法搜都稳定排第 1。`inject.maxChars` 必须装得下 `recent` 条，否则小的那个上限说话、另一个是谎话（实测一条注入行 400–800 字符、均值约 530）。`scripts/test-injection.mjs` 守着这件事：预算跳过超长记忆、两个上限不打架、老 `config.json` 的迁移，不碰记忆库、毫秒级。
+
+## 两路写入：Hook 与 MCP
+
+记忆有两个来源，它们不是冗余，而是各自补另一条的结构性缺陷：**hook 不会忘记，但不知道什么重要；MCP 知道什么重要，但可能想不起来写。** 只留 hook，库里全是原始对话；只留 MCP，一个不调工具的会话就等于什么都没发生，而且这种失效是安静的。两路的具体分工、字段、失败表现列在 [README](README.md#两条写入通道的分工)，这里只说为什么这么划。
+
+**hook 这一路捕获的单位是一轮对话，而不是一条 prompt。** 之前只记 prompt，等于把每轮里信息量更大的那一半直接丢掉——你问"这次构建为什么失败"，结论（"shader 缓存过期，构建前得先跑 clear-shader-cache-3311.bat"）在回答里，问题里一个字都没有。而这半边一直是免费的：mem0 的 `add()` 本来就收 `Message[]`，把两条消息交上去仍然只是**一次**抽取调用，配额零增长，只是那一次的 prompt 长了一点。`test-llm.mjs` 用桩模型断言了这件事——mem0 拼出来的抽取 prompt 里两侧都在。
+
+代价与边界：
+
+- **写入时机从"发出"推到"这一轮结束"。** 回答只有到 `stop` 才完整，所以记忆也只能那时才落库。换来的是完整的一轮，付出的是几分钟延迟和一条兜底路径。
+- **三个 hook 是三个进程，没有共享内存。** 一轮对话的两半因此得落到磁盘上（`~/.mem0-local/turns/<会话>.ndjson`），而且必须是**追加写**：一轮里可以有多条 assistant 消息，各自在自己的进程里，读-改-写会让后落地的那次覆盖掉前一次。
+- **没等到 `stop` 的那一轮必须有人认领。** 关窗口、切走、hook 被卸载，`stop` 就永远不来。三个地方兜：同一会话的下一条 prompt（发现还有暂存的就先写掉）、下一个 `sessionStart`、以及任何宿主里下一次启动 MCP server（后两者扫的是超过 `capture.turnTimeoutMinutes` 的，理由见[宿主差异](#宿主差异cursor-与-acp-宿主)）。都写成"只有 prompt 的一轮"，因为那半确实存在。`doctor` 的 `turns awaiting end` 报的就是这批——它是"记忆静默少了一条"的唯一可见处。
+- **回答只留尾部。** agent 的回答开头是"我先看一下日志"，结尾才是结论，所以截断从头上切、留 `capture.maxResponseChars`（默认 2000）。这个数直接乘在每次抽取的 token 上，mem0 自己的 prompt 已经约 9.7k。
+- **输入哈希按整轮算（prompt + 留下的回答），不只按 prompt。** 判重那道门在 mem0 之前，所以它按什么算，就决定了哪些轮次 mem0 有机会去挖。只按 prompt 算的话，同一个问题第二次问、这次得到的回答好得多，会在 mem0 看到新的那半之前就被静默拒掉——而 mem0 本来会挖出来：它的抽取会拿到已有记忆并只报新事实。原封不动的重放哈希不变，依然免费；代价是"同一问题、换个措辞的回答"要多花一次抽取（15 秒、一次配额），由 mem0 自己判断有没有新东西。
+- **该不该调模型按整轮的长度算**（`capture.inferMinChars`）。只量 prompt 会让"为什么？"配三段结论走原文路径，落库的是那句光秃秃的提问、回答整段丢掉。默认下 `minChars` 与 `inferMinChars` 都是 25，所以这条平时不触发，但一旦有人把 `inferMinChars` 调高，量错的那个版本就开始悄悄丢回答。
+- **回落原文时丢掉回答。** 抽取失败（超时、没登录、超配额）时 mem0 的原文路径是**一条消息存一条记忆**，把整段 agent 回答直接存成一条记忆只会污染库，所以回落只存 prompt 那一半。
+- **只接 `afterAgentResponse`，不接 `afterAgentThought`。** 思考块是过程，而且量大、措辞不定；抽取模型看它只会把"我先看一下日志"这类东西当成候选事实。
+- **`run_id` 仍然没用上。** 它才是 mem0 给"会话"留的键，能让 `## Last k Messages` 只回放本会话。但它同时进 payload，会改变判重与检索的过滤条件，收益（更干净的抽取上下文）远小于风险，所以留在原地。
+
+## 宿主差异：Cursor 与 ACP 宿主
+
+上一节分的是"记忆从哪来"，这一节分的是"你在哪用"。同一套安装（`~/.cursor/mcp.json` + `~/.cursor/hooks.json`）在不同宿主下能力并不相同，逐项对照在 [README](README.md#两类宿主分别能拿到什么)，这里说清楚它为什么这样、以及为此做了什么。
+
+**hook 引擎打包在 CLI 里，但 ACP 模式不调它。** 这不是"CLI 版本太老"或"配置写错了"，而是同一个二进制的两种模式行为不同：**本层的防递归就是 print 模式确实跑 hooks 的证据**——总结模型是拿 `cursor-agent --print` 起的，而正是它会触发 `beforeSubmitPrompt`、把抽取 prompt 记成一条记忆，所以才必须挡（见[总结模型：走 Cursor CLI](#总结模型走-cursor-cli)）。而 `cursor-agent acp` 实测一个都不跑：在 CLion 2026.2 里手工建会话、发 prompt，日志里既没有 `[session-start]` 也没有 `[capture]`，同一个会话里 MCP server 却照常启动。于是三类宿主：
+
+| 宿主 | hooks | MCP | 结果 |
+| --- | --- | --- | --- |
+| Cursor 桌面版、`cursor-agent`（含 `--print`） | 全跑 | 有 | 完整：自动记录 + 注入 + 工具 |
+| ACP 宿主（JetBrains 里的 `cursor-agent acp`） | **一个都不跑** | 有 | 缺自动记录，其余齐全 |
+| Cloud Agents | 只认仓库里的 `.cursor/hooks.json`，用户级的不加载；`sessionStart` 本身也不支持 | 有 | 记忆库在本机，本就不适用 |
+
+**这个缺口只丢"一定会记"，不丢"记得好"。** ACP 宿主下 AI 依然拿得到会话注入和 6 个工具，所以它主动写下的高质量记忆一条不少；缺的是那条不依赖模型自觉的确定性通路。这也是为什么两路写入必须都存在：如果自动记录是唯一来源，换一个宿主就等于整套系统静默失效。
+
+**认领没结束的轮次因此做成了宿主无关的。** 按轮捕获把 prompt 暂存在 `~/.mem0-local/turns/` 里，而认领它的两个 hook（下一条 prompt、下一个 `sessionStart`）都只在 Cursor 跑。所以 MCP server 启动时也认领一次：每类宿主都会起它，于是"在 Cursor 里丢下半轮、然后一整天待在 CLion"这条路径不再是记忆静默少一条。probe 运行（`MEM0_LOCAL_PROBE=1`，巡检和测试走的那条）跳过这一步——让被测试驱动的路径去写真实记忆库，和让它去删一样不合适。
+
+**要补齐自动记录，只能在 IDE 和 agent 之间插一个 ACP stdio 代理**：JetBrains 允许在 `~/.jetbrains/acp.json` 里把 agent 命令换成自己的程序，由它转发 ACP 的 JSON-RPC 并顺手抄一份 prompt 与回复。尚未实现——它要跟一个没有稳定契约的协议双向对齐，而当前收益（一个宿主的自动记录）撑不起这份维护成本。
+
+不受宿主影响的部分：记忆库、仓库归属与隔离、判重、重排、抽取模型，以及**失效告警和每月清理**——那两个跑在 Windows 计划任务里、在 IDE 之外，本来就与你用哪个宿主无关。唯一没被监控的失效也在这条边界上：cursor-agent 是否继续转发 MCP 的 `instructions` 是实测行为而非契约（见[失效告警](#失效告警)末尾）。
 
 ## `kind`：一份自己的类别词表
 
@@ -129,9 +168,11 @@ mem0 的事实抽取
 | 这一道 | 怎么问 | 命中时 |
 | --- | --- | --- |
 | 同一份输入又来了 | 把输入哈希下推给 mem0 的过滤器（`getAll({ filters: { …, source_hash } })`，存储层就筛掉了，不需要嵌入） | **静默**返回 0 条。这只说明这份输入已经处理过——重放的捕获、重复的命令——没有需要人判断的东西 |
-| 说的是同一件事 | 用 mem0 的 `search()` 看最近一条的 `score_details.semanticScore`（≥ `dedupe.similarity`，默认 0.92） | **报错**并点名撞上的那条。只有调用方能决定是改那条还是坚持这是两件事——`force` / `--force` 是后者的出口 |
+| 说的是同一件事 | 用 mem0 的 `search()` 取回 10 条，挑其中 `score_details.semanticScore` 最高的那条（≥ `dedupe.similarity`，默认 0.92） | **报错**并点名撞上的那条。只有调用方能决定是改那条还是坚持这是两件事——`force` / `--force` 是后者的出口 |
 
 `source_hash` 哈希的是**输入原文**而不是存下来的文本：开模型后存的文本已经和你打的字不一样，靠比对文本认不出"同一条 prompt 又发了一次"，那会白花 15 秒和一次配额。第二道只在原文路径上跑，抽取路径上 mem0 自己做得更好（它比的是事实不是措辞）。阈值和用 `semanticScore` 而非融合分的理由都在 `src/config.mjs` 与 `src/memory.mjs` 注释里。
+
+**第二道不能只看第一名。** mem0 返回的顺序是融合分排的，BM25 和实体加权都会挪动它，所以余弦最高的那条不一定排在最前——只问第一名等于问了另一个问题，真正的近似重复排第二就漏掉了。取 10 条再自己挑余弦最大的那条，而 mem0 无论要几条都至少扫 60 行（`internalLimit = max(topK * 4, 60)`），所以这 10 条不多花任何检索成本。
 
 ## 记忆的更新与淘汰
 
@@ -142,9 +183,17 @@ mem0 的事实抽取
 | 就地改正 | `memory_update`；`cli update <id> "新正文"` | 保留 id、`createdAt` 和它在注入列表里的位置，只刷新 `updatedAt`。删了重写这两样都会丢 |
 | 设到期日 | `memory_update` 的 `expiresAt`；`cli add/update --expires` | 过期后 mem0 自己把它从 `search` 和 `getAll` 里滤掉，于是也不再进下一个会话的注入。这是本地唯一真正意义上的自动淘汰 |
 
-已知保质期的事实（量出来的耗时、依赖版本、等 bug 修好就没用的绕法）写入时就该带上到期日。**过期是可逆的**：`resolveMemoryId` 用 mem0 的 `showExpired` 把过期记录一并纳入，CLI 有 `list --expired`、MCP 有 `includeExpired`，`--clear-expiry` 清掉到期日。**改 scope 也是就地改**（`--scope global`），一条事实后来发现是通用习惯时用它，别删了重加。
+**就地改正唯一销毁的东西是旧正文，所以要有地方能看回去。** mem0 每次 ADD / UPDATE / DELETE 都往历史库写一行、并且带着被替换掉的那段文本，但它自己从不读回来。`cli history <id>` 就是这个读口，给的是"怀疑上次 `memory_update` 把正文改坏了"这一种场合。三个决定：
 
-**过期只是隐藏，所以还需要一次真删。** mem0 的到期只让记忆从 `search`/`getAll` 里消失，行还在文件里，而**过期的行不是惰性的**：`keywordSearch` 不过滤它们、实体检索的过滤器只带 `user_id`，于是一条过期记忆命中 BM25 或实体就会抬高归一化分母，压低可见结果的分数（见[上游已知问题](#上游-mem0-的已知问题)）。所以有 `prune --expired`，和一个每月 1 号跑它的计划任务（`npm run install-sweeper`）。三个决定：
+- **只加 CLI，不加 MCP 工具。** MCP 工具的 schema 每个会话都要进上下文，而这是个排查动作、不是 AI 平时该做的事，为它常驻一份描述不划算。
+- **id 照写入那套归属校验解析**，尽管这只是读。历史行只带 memory id、不带 `agent_id`，所以拿一个跨仓库搜到的 uuid 直接问 mem0，它会老实把别人家的变更行给你。
+- **排序按 mem0 返回的行序（`ORDER BY id DESC`，新的在前），不按行里的日期。** 那两个日期不是"这行是什么时候写的"：`created_at` 是记忆自己的创建时间、每行都一样，`updated_at` 只有 UPDATE 行才有，DELETE 行两个都空。
+
+一处盲区：换 `agent_id` 之前每个仓库一个历史库文件，那批记忆的变更行留在 `~/.mem0-local/history/` 里，当前的 `history.db` 里没有。命令会在查不到时说清行在哪儿，但不去读——那个布局已经废弃，而记忆 id 到旧文件名的对应关系恰恰会被一次 re-key 打断。删掉的记忆同理查不到：id 是按现存记忆解析的。
+
+已知保质期的事实（量出来的耗时、依赖版本、等 bug 修好就没用的绕法）写入时就该带上到期日。**过期是可逆的**：`resolveMemoryId` 用 mem0 的 `showExpired` 把过期记录一并纳入，CLI 有 `list --expired`、MCP 有 `includeExpired`，`--clear-expiry` 清掉到期日。
+
+**过期只是隐藏，所以还需要一次真删。** mem0 的到期只让记忆从 `search`/`getAll` 里消失，行还在文件里，而**过期的行不是惰性的**：`keywordSearch` 和实体检索都不看到期日，于是一条过期记忆命中 BM25 或实体就会抬高归一化分母，压低可见结果的分数（见[上游已知问题](#上游-mem0-的已知问题)）。所以有 `prune --expired`，和一个每月 1 号跑它的计划任务（`npm run install-sweeper`）。三个决定：
 
 - **留 30 天反悔窗口**（`prune.expiredGraceDays`）。到期当天就删会把上面那句"过期是可逆的"悄悄作废——`list --expired` 还在，但已经没有东西可看了。删的是"过期已满 30 天"的，不是"已过期"的。
 - **不挂在 watchdog 那次巡检上**。它每 2 小时跑一次，看着顺手，但 `test-health.mjs` 会真跑那条路的探活——让一个被测试驱动的路径带上删除权限，等于让一次跑测试就能动到真实记忆库。
@@ -154,7 +203,9 @@ mem0 的事实抽取
 
 **短 id 就够用**：注入和 CLI 列表里每条只印 8 位（`(id: 1223f031)`），这是 AI 平时唯一能拿到的形式，所以 `memory_update` / `memory_delete` 接受任意长度前缀，撞车会报错并列出候选。
 
-**写入一律限定在本仓库（加全局），完整 uuid 也不例外。** 读可以跨仓库（`scope: "all"`），而这恰恰是一个仓库拿到另一个仓库完整 uuid 的地方，所以 uuid 不被当作可信凭据，和短前缀走同一套归属校验，点到别人家的记忆会报出属主。否则跨仓库的读权限就等于对整个库的写权限。`test-retrieval.mjs` 有专门用例守着。顺带修掉的一处：mem0 把变更历史记在执行写入的那个实例上，而本层每个仓库一个历史库，所以 `update`/`delete` 都路由到**记忆归属方**的实例。
+**写入一律限定在本仓库，完整 uuid 也不例外。** 读可以跨仓库（`scope: "all"`），而这恰恰是一个仓库拿到另一个仓库完整 uuid 的地方，所以 uuid 不被当作可信凭据，和短前缀走同一套归属校验，点到别人家的记忆会报出属主。否则跨仓库的读权限就等于对整个库的写权限。`test-retrieval.mjs` 有专门用例守着。
+
+**一条记忆归哪个仓库，是写入时定的、之后改不了**：归属现在就是 mem0 的 `agent_id`，而 mem0 的 `update()` 会先 `stripIdentityKeys` 再合并，所以公开 API 根本改不动它（见[仓库标识就是 mem0 的 agent_id](#仓库标识就是-mem0-的-agent_id)）。换 remote 之后的重新归属因此是一次维护操作，不是一条 `update`。
 
 ## 第四路：重排
 
@@ -169,9 +220,22 @@ mem0 的事实抽取
 
 正确答案从第 3 名回到第 1 名，分差从"三条挤在 0.32–0.37"变成四个数量级。回归测试用一对故意对立的 fixture 守着：一条真答了"编译要用哪个脚本"，另一条只是反复出现 `build`——交叉编码器给前者 0.974、给后者 1.4e-5。
 
-两个实现要点：**候选集要加宽**（mem0 只把它自己要返回的那批交给重排，所以按 `topK` 去要等于只在"本来就要返回的 6 条"里换顺序，最该救回来的那条已经被截掉了；本层要 `reranker.candidates` 条，默认 25，重排完再切）；**失败是软的**（模型没下载、离线、库没装，mem0 内部 catch 掉并原样返回融合顺序，唯一能看出没生效的地方是 `doctor` 的 `reranker` 那行和结果里没有 `rerank=`）。
+两个实现要点：**候选集要加宽**（mem0 只把它自己要返回的那批交给重排，所以按 `topK` 去要等于只在"本来就要返回的 6 条"里换顺序，最该救回来的那条已经被截掉了；本层要 `max(topK * 4, reranker.candidates)` 条，重排完再切。倍数是抄 mem0 自己的——它给融合打分的候选池就是 `max(topK * 4, 60)`——因为写成常数 25 的话，`topK` 一旦追上它，加宽就连同重排的意义一起悄悄消失了）；**失败是软的**（模型没下载、离线、库没装，mem0 内部 catch 掉并原样返回融合顺序，唯一能看出没生效的地方是 `doctor` 的 `reranker` 那行和结果里没有 `rerank=`）。
 
-代价：`Xenova/ms-marco-MiniLM-L-6-v2` 约 87MB，首次搜索时下到 `~/.mem0-local/models/transformers`，之后每次搜索约 600ms。不想要就 `reranker.enabled: false`。mem0 另外三个 provider 都不能用（`cohere`/`zero_entropy` 是 HTTP API，会把记忆正文发出本机；`llm_reranker` 每条记忆一次模型调用，本层的桥是 CLI，一次搜索要几十秒），填了它们会**降级成不重排**并在 `doctor` 里写明原因，而不是让一整层记忆失效。
+**候选集要多宽，量过一次。** `scripts/bench-candidates.mjs` 拿 12 个自然提问打真实记忆库（67 条），对每个提问比较候选池 6 / 25 / 60 / 全部时重排选出的第一名：
+
+| 候选池 | 12 个提问里第一名不同的 | 每次搜索均值 |
+| --- | --- | --- |
+| 6（等于 `topK`） | 1 条被截在池外 | — |
+| 25（当前默认） | 0 | 1448ms |
+| 60 | 0 | 1735ms |
+| 全部 67 | 0 | 1797ms |
+
+那唯一一条的融合分排名是 **15/67**——池子 6 时它根本进不了重排，池子 25 就够了，再宽没有任何变化。同时这也回答了另一个担心：**原文写入的记忆没有实体行**（mem0 只在抽取路径上链接实体），第三路加权因此对它们不生效，但 12 个提问里有 9 个的第一名本来就是原文写入的 `memory_add` 记忆、融合分排名第 1——缺的那点加权并没有把它们埋掉，所以不必去给原文路径补实体链接。
+
+这个结论跟库的规模有关：那条排在 22% 分位上，库大了同一分位就会掉到 25 名之后。所以记忆量明显增长后重跑一次这个脚本，"第一名不同的"回到非 0 就把 `reranker.candidates` 调宽——从 25 到 67 只多 350ms，不贵。
+
+代价：`Xenova/ms-marco-MiniLM-L-6-v2` 约 87MB，首次搜索时下到 `~/.mem0-local/models/transformers`，之后每次搜索约 600ms（上表是同一进程里连续搜索、含嵌入与三路融合的端到端耗时，不可与这个数直接比）。不想要就 `reranker.enabled: false`。mem0 另外三个 provider 都不能用（`cohere`/`zero_entropy` 是 HTTP API，会把记忆正文发出本机；`llm_reranker` 每条记忆一次模型调用，本层的桥是 CLI，一次搜索要几十秒），填了它们会**降级成不重排**并在 `doctor` 里写明原因，而不是让一整层记忆失效。
 
 ⚠️ **两个原生 ONNX 运行时不能共存。** fastembed 钉 `onnxruntime-node@1.21.0`，`@huggingface/transformers` 钉 `1.24.3`，装成两份之后同一进程里先加载 fastembed 再加载重排模型会**直接把进程打死**——0xC0000005 访问违例，没有任何 JavaScript 异常，只有一个非零退出码。`package.json` 的 `overrides: { "onnxruntime-node": "1.24.3" }` 把两者压到同一份运行时上（已验证 fastembed 在 1.24.3 上照常工作，向量维度和分数不变）。升级这两个包中任何一个之后，务必重新确认这个 override 仍然成立。
 
@@ -215,9 +279,9 @@ watchdog            all 3 runtime(s) ok 0m ago; scheduled task registered
 
 ## 与 mem0 的边界
 
-本目录是**纯接入层**：不修改上游任何文件，不 monkeypatch，不访问 mem0 的私有字段，只通过公开 API 和官方扩展点接入。
+本目录是**纯接入层**：不修改上游任何文件，不 monkeypatch，不访问 mem0 的私有字段，只通过公开 API 和官方扩展点接入。**唯一的例外是 `src/payload-store.mjs`**，它直接改 mem0 存下来的 payload，只为了重写归属键——原因和边界见[仓库标识就是 mem0 的 agent_id](#仓库标识就是-mem0-的-agent_id)。
 
-**只调用这些公开 API**：`new Memory(config)`、`memory.add()`、`memory.search()`、`memory.getAll()`、`memory.get()`、`memory.update()`、`memory.delete()`。所有配置项（`embedder` / `vectorStore` / `historyStore` / `infer` / `filters` / `metadata` / `showExpired` / `expirationDate`）都是 `MemoryConfig`、`AddMemoryOptions` 与 `UpdateMemoryOptions` 里公开声明的字段。
+**只调用这些公开 API**：`new Memory(config)`、`memory.add()`、`memory.search()`、`memory.getAll()`、`memory.get()`、`memory.update()`、`memory.delete()`、`memory.history()`。所有配置项（`embedder` / `vectorStore` / `historyStore` / `infer` / `filters` / `metadata` / `showExpired` / `expirationDate`）都是 `MemoryConfig`、`AddMemoryOptions` 与 `UpdateMemoryOptions` 里公开声明的字段。
 
 **通过官方扩展点接入**，而不是改代码：
 
@@ -226,14 +290,49 @@ watchdog            all 3 runtime(s) ok 0m ago; scheduled task registered
 | `embedder.provider = "langchain"` | mem0 只要求传入对象有 `embedQuery` / `embedDocuments`，于是本地 fastembed 包装成这个形状。逻辑与 mem0 内置的 `FastEmbedEmbedder` 等价，唯一区别是显式指定了模型缓存目录（内置实现会下载到当前工作目录） |
 | `llm.provider = "langchain"` | mem0 为"自定义模型"留的注入点：只要求有 `invoke()` 且返回值带字符串 `content`。本层的 CLI 桥就是这个形状，并**故意不实现** `withStructuredOutput` / `bindTools`——那样 mem0 会走它自己的纯文本分支，用自带的 `extractJson` 解析 |
 | `vectorStore.provider = "memory"` | 这就是 mem0 自带的 SQLite 向量库实现，没有替换 |
-| `historyStore.provider = "sqlite"` | mem0 自带的历史库，只改了文件路径——每个仓库一个文件，见下 |
+| `historyStore.provider = "sqlite"` | mem0 自带的历史库，只改了文件路径（`~/.mem0-local/history.db`）。一个文件够了：它同时存变更日志和 mem0 回放的 `## Last k Messages`，而后者的 key 里就带着 `agent_id`，仓库之间从构造上互不可见 |
 | `customInstructions` | `MemoryConfig` 的公开字段，mem0 会作为 `## Custom Instructions` 拼进抽取 prompt 并声明为最高优先级。本层只用它要求"写成英文、话题前置、标识符原样保留" |
 
 **抽取与写入完全走 mem0 自己的流程**：prompt 模板、few-shot、与已有记忆的去重判断、条目 id、内容 hash、`createdAt`、BM25 用的 `textLemmatized`、历史记录，全部由 mem0 生成。本层只做两件事：把 messages 拼成 CLI 能接受的单段 prompt，把回来的**原始文本**交还给 mem0 解析——不做任何裁剪，因为 mem0 的 `extractJson` 是个能识别字符串转义的括号匹配器，比"截取第一个 `{` 到最后一个 `}`"稳。本层只判断一件事：回复里**根本没有** JSON 时视为失败，从而触发原文回落，而不是让这条记忆无声无息地不见。
 
 **输出契约完整生效**：mem0 用严格 schema 校验模型回复（每条要求字符串 `id` 和 `text`，可选 `attributed_to` / `linked_memory_ids`），失败才退到宽松解析。实测真实模型经过本层的 prompt 拼装后走的是严格分支，`attributedTo` 也已透传到 CLI 与 MCP 的返回里。
 
-**本层只额外附加 5 个 metadata 键**（`project` / `project_name` / `kind` / `source` / `source_hash`），均不与 mem0 的保留键（`data`/`hash`/`createdAt`/`updatedAt`/`textLemmatized`/`user_id`/`agent_id`/`run_id`/`expiration_date`）重名。已确认 `infer: true` 路径下这些键同样完整落库，所以开模型不会破坏项目隔离。
+**本层只额外附加 4 个 metadata 键**（`project_name` / `kind` / `source` / `source_hash`），均不与 mem0 的保留键（`data`/`hash`/`createdAt`/`updatedAt`/`textLemmatized`/`user_id`/`agent_id`/`run_id`/`expiration_date`）重名。已确认 `infer: true` 路径下这些键同样完整落库，所以开模型不会破坏项目隔离。`project_name` 只用于显示——每个 clone 的目录名都一样，它不是能用来分仓库的东西。
+
+### 仓库标识就是 mem0 的 agent_id
+
+**仓库归属不是本层自己的字段，就是 mem0 的 `agent_id`。**（写入时由 `filters` 带进去，mem0 自己抄到 payload 上；读取时 `scopeFilters` 只传 `{ user_id, agent_id }`。）早先它是本层自己加的一个 `project` metadata 键，能用，但**只在向量过滤这一处能用**——mem0 有三处按作用域工作的机制，都只认它自己的身份键：
+
+| mem0 的机制 | 作用域取自 | 用 metadata 键时只能这样绕 |
+| --- | --- | --- |
+| `vectorStore` 过滤（`search` / `getAll`） | 任意 payload 键 | 本来就能用 |
+| 实体索引（第三路加权的来源） | `user_id` / `agent_id` / `run_id` | 绕不过去，只能靠"候选集已被过滤"让加分落不到实处 |
+| `## Last k Messages` 的 `sessionScope` | 同上，`buildSessionScope` 只读这三个 | 每个仓库一个历史库文件 |
+
+换成 `agent_id` 之后这三处一起对齐：实体索引按仓库分行、消息回放按仓库分 key，于是**每仓库一个 mem0 实例、每仓库一个历史库文件都不再需要**，`openMemory()` 收成一个实例，历史库回到一个 `history.db`。
+
+代价是明确的，也是接受了的：
+
+- **没有"全局记忆"了。** `agent_id` 是身份键，一次查询只接受一个值（`validateAndTrimEntityId` 不收数组），所以"本仓库 + 全局"这种一次读两个作用域的写法没法表达。硬要做只能一次搜索发两次、再把两批结果拼起来——而融合分不可跨查询比较，拼出来的顺序是假的。`--global` / `--scope global` 因此一并删掉。
+- **归属写入即固定。** mem0 的 `update()` 对传入 metadata 先跑 `stripIdentityKeys`，身份键根本进不去。所以换 remote 之后的重新归属没有公开 API 可用，`delete` + 重新 `add` 又会丢 id 和 `createdAt`（注入列表和短 id 都是按它们寻址的）。
+- **于是有了一个例外文件。** `src/payload-store.mjs` 是全项目唯一直接读写 mem0 那两个 SQLite 文件的地方，规则收得很窄：只重写归属键，从不新建记忆、不碰向量、不在正常运行时执行——只由两个维护脚本按需调用，且先自动备份（备份前先 `wal_checkpoint`，否则复制出来的快照会缺掉还在 `-wal` 里的行）。
+- **实体行要跟着搬。** 一行实体记的是"这个实体关联了哪些 memory id"，按仓库分行之后，一行只能属于一个仓库；如果它关联的记忆分属多个仓库，就得按仓库**拆成多行**（复用已存的向量，所以不需要嵌入模型，结果和 mem0 自己写出来的一样）。漏掉这步的后果是安静的：实体行留在原处，第三路加权要么消失、要么加到别的仓库的搜索上。
+
+两个脚本共用这一个入口：`migrate-to-agent-scope.mjs` 把老的 `project` 键搬进 `agent_id`（幂等，默认只报告），`rekey-project.mjs` 处理换 remote 之后的改标识。`resolveProject` 也随之把标识里的空白折成 `-`：`agent_id` 不许带空格，而目录名带空格是完全可能的。
+
+### 和 mem0 默认值不一样的三处
+
+逻辑一律照 mem0 的走，但有三个**默认值**是本层自己定的。列在这里，因为它们决定了你实际看到多少记忆，而每一处都有一行配置可以调回 mem0 的原值：
+
+| 这一处 | mem0 的默认 | 本层的默认 | 为什么 |
+| --- | --- | --- | --- |
+| 一次搜索返回几条（`search.topK`） | 20 | 6 | mem0 的 20 是给"只有融合分、分不开相关与否"的默认配置定的；本层每次搜索都跑交叉编码器，而它的判决极陡（0.15 对 1e-5），第一名之后基本是让 AI 白读的填充。想要 mem0 的行为就把它设成 20 |
+| 手动写入是否走抽取（`infer`） | `add()` 默认 `true` | `memory_add` / `cli add` 默认原文直存 | AI 写下的本来就是一条干净事实，再过一遍模型只多花 15 秒和一次配额，还可能被改写。需要时按次开：`distil: true` / `--infer`。自动捕获的 prompt 相反，默认全走抽取 |
+| 列表类读取要几条 | `getAll` 默认 20 | 整个集合，排序和截断自己做 | 不是偏好，是绕开上游的 bug：`vectorStore.list` 没有 `ORDER BY`，任何小于集合规模的 `topK` 截到的都是最旧那批（见[上游已知问题](#上游-mem0-的已知问题)） |
+
+`search.threshold` 不在表里：本层默认不传，用的就是 mem0 自己的 0.1。
+
+**`topK` 是上限，不是配额。** mem0 按融合分排序后 `slice(0, topK)`，所以真正返回的是"过了阈值的条数"与 `topK` 里的较小值；命中少的查询就返回得少。想要更宽的召回只该调 `topK`，不该调 `threshold`——那道门槛只卡原始语义分且不可跨查询比较（同上表）。
 
 ### 提示词：只补 mem0 没说的
 
@@ -249,14 +348,14 @@ mem0 判断"哪些是新事实"的依据不只是你这次的输入，还有它�
 
 | mem0 的来源 | 默认作用域 | 不处理会怎样 | 本层怎么做 |
 | --- | --- | --- | --- |
-| `## Existing Memories` | 只按 `user_id` | 另一个仓库有条等价记忆，模型就判"已经记过了"，本仓库这条事实**永远不会写入** | 写入时也把项目过滤传给 mem0 的 `filters`，和检索用的是同一套 |
-| `## Last k Messages` | `sessionScope` 只由 `user_id`/`agent_id`/`run_id` 拼成，**拿不到** metadata | 别的仓库的 prompt 会作为"最近对话"进入本仓库的抽取上下文 | 每个仓库一个历史库文件（`historyStore.config.historyDbPath` 是公开字段），从构造上隔离 |
+| `## Existing Memories` | 只按 `user_id` | 另一个仓库有条等价记忆，模型就判"已经记过了"，本仓库这条事实**永远不会写入** | 写入时也把仓库过滤传给 mem0 的 `filters`，和检索用的是同一套 |
+| `## Last k Messages` | `sessionScope`，由 `user_id`/`agent_id`/`run_id` 拼成 | 别的仓库的 prompt 会作为"最近对话"进入本仓库的抽取上下文 | 仓库标识就是 `agent_id`，于是它自动进了这个 key——同一个历史库文件里，两个仓库的消息互相看不见 |
 
-两条都有确定性回归测试：`scripts/test-llm.mjs` 用桩模型录下 mem0 真正构造的 prompt，断言另一个仓库的记忆和消息都不在里面。不花钱、不依赖模型发挥。
+两条都有确定性回归测试：`scripts/test-llm.mjs` 用桩模型录下 mem0 真正构造的 prompt，断言另一个仓库的记忆和消息都不在里面。**两个仓库共用同一个 `Memory` 实例**跑这两个断言，这样测的就是 `agent_id` 本身在隔离，而不是"两个实例各写各的文件"。不花钱、不依赖模型发挥。
 
-v3.1.6 的 `escapeScopeValue`（上游 #6892）只是把 `sessionScope` 里的 `%&=` 转义掉，避免不同 `user_id`/`run_id` 拼出同一个 key；它没有把 metadata 引进作用域，所以上表第二行的隔离手段依然是必需的。
+v3.1.6 的 `escapeScopeValue`（上游 #6892）把 `sessionScope` 里的 `%&=` 转义掉，避免不同的身份键拼出同一个 key；仓库标识走 `agent_id` 之后，本层正好落在它保护的范围内（`/` 不需要转义，空白由 `resolveProject` 提前折掉）。
 
-项目过滤一律**下推给 mem0 的 `filters`**，在存储层生效而不是取回后再筛——否则 top-k 截断会让其他仓库的记忆挤掉本仓库的命中。写法是数组简写 `{ project: [本仓库, 全局] }`，这不只是"能用"：mem0 的 `search` 一旦判定过滤器里有"高级操作符"，就会把所有对象取值的键删掉重写，而数组被它明确排除在外。写成 `{ project: { in: [...] } }` 反而会踩进重写逻辑。
+仓库过滤一律**下推给 mem0 的 `filters`**，在存储层生效而不是取回后再筛——否则 top-k 截断会让其他仓库的记忆挤掉本仓库的命中。
 
 ### 检索的三路信号
 
@@ -279,7 +378,7 @@ mem0 v3 的检索是三路并行打分后融合的，本层没有替换其中任
 
 还有一条不太直觉的：**改过正文的记忆会凭空多出实体信号**。mem0 的 `updateMemory` 在文本变化时会调 `_linkEntitiesForMemory`，而 `createMemory` 不会。实测同一条记忆原文写入后实体表 0 行，`update` 改完正文变 4 行，删除后回到 0 行——于是两条正文完全相同的记忆，改过的那条有实体加权。没去追平它：mem0 没提供"给已有记忆补建实体"的公开入口，而且抽出来的实体质量本就有限（那次抽到的是 `verifyProbeHelper.mjs`、`helper lives in`、`mjs and is called`、`every night`，只有第一个是真实体）。
 
-**实体索引是跨仓库共享的**（mem0 按 user 作用域，拿不到我们的 project）。已验证这不会让别的仓库的记忆进入结果——实体加权只是给一批 memory id 加分，而候选集本身已被项目过滤限定，跨仓库的 id 不在候选里，加分落不到实处。测试里有专门用例守着。
+**实体索引按仓库分行**：mem0 的实体查找也按 `user_id`/`agent_id` 过滤，而仓库标识就是 `agent_id`，所以同一个标识符出现在两个仓库里会各有一行实体，去重也只在仓库内部发生。两层保险：加分只落在候选集里的 memory id 上，而候选集本身已被同一个过滤器限定。测试里有专门用例守着（两个仓库写同一个 `10.BuildPC.bat`，断言彼此看不见、且各自的实体加权照常生效）。
 
 **关掉模型时**（`llm.enabled: false` 或 `MEM0_LOCAL_NO_LLM=1`）整条链路无需任何模型服务即可离线运行，代价是不启用事实抽取、实体库也不会被写入。这是配置选择，不是功能被破坏。
 
@@ -294,7 +393,7 @@ mem0 v3 的检索是三路并行打分后融合的，本层没有替换其中任
 | 原文写入不建实体索引，改正文却会建 | 实体加权对大多数记忆是死的，且编辑过的记忆行为不同 |
 | 最终分数不能跨查询比较 | 归一化分母随本次候选集里出现了哪几路信号而变 |
 | 模型产出的 `linked_memory_ids` 被丢弃 | 抽取 schema 里声明了这个字段，OSS 实现不落库，记忆之间的关联拿不到 |
-| 隐身的记忆能改变可见记忆的分数 | `keywordSearch` 不过滤过期记忆，实体检索的过滤器只带 `user_id`/`agent_id`/`run_id`。于是一条已过期的、或别的仓库的记忆命中 BM25 或实体，就会把分母抬高，哪怕没有任何可见结果真的拿到那份加分。不泄露内容，只污染分值 |
+| 隐身的记忆能改变可见记忆的分数 | `keywordSearch` 与实体检索都不看到期日（前者连身份键之外的过滤都不做减法：它照 `filters` 过滤，但过期与否不在其中）。于是一条已过期的记忆命中 BM25 或实体，就会把分母抬高，哪怕没有任何可见结果真的拿到那份加分。不泄露内容，只污染分值 |
 | 默认 `threshold: 0.1` 基本不起作用 | 它只作用于原始语义分，而 bge-small 对完全无关的英文句子普遍给到 0.4–0.6，所以 `memory_search` 几乎总是返回满 topK。调高它并不能解决（分母不可比），真正把相关的顶上来的是重排 |
 | BM25 对中文完全失效 | `lemmatizeForBm25` 遇到不含 ASCII 的文本会直接返回整串原文，而分词按空白切，中文没有空格，整句变成一个 token，永不命中 |
 | 每次读都是全表扫描 | `search` / `list` / `keywordSearch` 都是 `SELECT * FROM vectors` 再逐行 JSON.parse。万级以内无感 |
@@ -303,6 +402,6 @@ mem0 v3 的检索是三路并行打分后融合的，本层没有替换其中任
 **本层对 mem0 运行时的 4 处外部影响**（均不改变其逻辑）：
 
 1. `console.log/info/debug` 在本层进程内重定向到 stderr —— MCP 用 stdout 传 JSON-RPC。日志不丢，去 stderr（Cursor 的 MCP 输出面板可见）
-2. 对 mem0 的 SQLite 文件设置 `journal_mode = WAL` —— 这是全层唯一一处**不经 mem0 的 API 直接碰它的文件**：`setWal()` 自己开一个 `better-sqlite3` 句柄，只为发一条 pragma，且必须发生在 mem0 打开该文件之前（换 journal mode 需要排他锁）。mem0 没有公开设置 journal mode 的入口，而 pragma 存在文件里、与表结构无关，所以这条越界的代价是"升级后要确认文件路径没变"，不是"升级后行为会变"。整个函数 best-effort，失败只写日志
+2. 对 mem0 的 SQLite 文件设置 `journal_mode = WAL` —— 正常运行时唯一**不经 mem0 的 API 直接碰它的文件**的地方：`setWal()` 自己开一个 `better-sqlite3` 句柄，只为发一条 pragma，且必须发生在 mem0 打开该文件之前（换 journal mode 需要排他锁）。mem0 没有公开设置 journal mode 的入口，而 pragma 存在文件里、与表结构无关，所以这条越界的代价是"升级后要确认文件路径没变"，不是"升级后行为会变"。整个函数 best-effort，失败只写日志。（另一处是 `src/payload-store.mjs`，只在维护脚本里跑，见[上文](#仓库标识就是-mem0-的-agent_id)）
 3. `MEM0_TELEMETRY=false` —— mem0 的遥测与 notice 机制在此开关下直接返回，不产生任何外发请求
 4. 把 `@huggingface/transformers` 的 `env.cacheDir` 指到 `~/.mem0-local/models/transformers` —— 这是那个库自己的配置方式（mem0 只是 `await import()` 它，拿到同一个模块实例）。默认目录在它自己的包目录里，会被下一次 `npm install` 抹掉

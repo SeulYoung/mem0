@@ -107,15 +107,31 @@ export const DEFAULT_CONFIG = {
     /** null keeps the provider's default model. */
     model: null,
     /**
-     * How many hits to hand the cross-encoder before cutting down to the caller's
-     * topK. Reranking only re-orders what the first stage found, so this is the
-     * window it gets to work in: too narrow and the right memory was already cut.
+     * Floor on how many hits to hand the cross-encoder before cutting down to
+     * the caller's topK. Reranking only re-orders what the first stage found, so
+     * this is the window it gets to work in: too narrow and the right memory was
+     * already cut. The window actually used is `max(topK * 4, this)`, which is
+     * mem0's own over-fetch factor — it pulls `max(topK * 4, 60)` into the pool
+     * it fuses and scores — so the window keeps growing with topK instead of
+     * being overtaken by it.
      */
     candidates: 25,
   },
 
   /** Retrieval knobs that belong to mem0's search, not to ours. */
   search: {
+    /**
+     * Ceiling on how many memories a search returns. Not a quota: mem0 sorts by
+     * the fused score and cuts, so a query with fewer good matches returns fewer.
+     *
+     * mem0's own default is 20. Fewer here because this layer runs its
+     * cross-encoder on every search, and that stage is decisive in a way the
+     * fused score is not: measured on this repository, the right memory comes
+     * back around 0.15 while the next one is at 1e-5. Past the first few, what
+     * mem0 would return is padding an agent has to read. Set this to 20 to get
+     * mem0's own behaviour back.
+     */
+    topK: 6,
     /**
      * mem0's relevance floor on the fused score. null leaves mem0's own default
      * (0.1) in place. Raising it is tempting but the fused score is not
@@ -158,12 +174,41 @@ export const DEFAULT_CONFIG = {
      */
     infer: true,
     /**
-     * Every captured prompt goes through the model, however short. Verbatim
+     * Every captured turn goes through the model, however short. Verbatim
      * storage would leave the original language in the store, and the embedding
      * model is English-only — an unprocessed Chinese prompt is close to
      * unretrievable. Raise this to trade recall for fewer calls.
+     *
+     * Counted over the whole turn (the prompt plus the reply that is kept), not
+     * over the prompt: "why?" answered with three paragraphs of findings is
+     * worth extracting, and measuring the prompt alone would store the bare
+     * question and drop the answer.
      */
     inferMinChars: 25,
+    /**
+     * Wait for the turn to finish and hand mem0 the prompt *and* the agent's
+     * reply as one two-message conversation, which is the shape `add()` is built
+     * for. Costs no extra model calls — still one extraction per turn — and the
+     * conclusion of a turn usually lives in the reply, not in the question.
+     *
+     * Turn this off to go back to extracting from the prompt alone, which
+     * records a turn the moment you send it instead of when it ends.
+     */
+    includeResponse: true,
+    /**
+     * Ceiling on how much of the reply is handed over, counted across all of the
+     * turn's assistant messages. The **tail** is kept: an agent's reply opens
+     * with what it is about to do and closes with what it found. Every character
+     * here is billed on top of mem0's own ~9.7k-token extraction prompt.
+     */
+    maxResponseChars: 2000,
+    /**
+     * How long a turn may stay in flight before it is written from the prompt
+     * alone. Closing the window mid-turn means no `stop` hook ever fires, and
+     * without this the prompt would sit in `turns/` unrecorded. Long enough that
+     * a genuinely slow agent run is never cut short.
+     */
+    turnTimeoutMinutes: 120,
   },
 
   /** What a fresh session is told about this repository before you type. */
@@ -198,9 +243,9 @@ export const DEFAULT_CONFIG = {
 
   /**
    * Deleting what has expired. Expiry itself only hides a memory from `search`
-   * and `getAll`; the row stays, and an expired row is not inert — mem0's
-   * keyword pass does not filter them and its entity filter is scoped by user
-   * only, so an expired memory can still raise the divisor that visible results
+   * and `getAll`; the row stays, and an expired row is not inert — neither mem0's
+   * keyword pass nor its entity pass looks at the expiry date, so an expired
+   * memory of this repository can still raise the divisor that visible results
    * are normalised by. Install the monthly sweep with `npm run install-sweeper`.
    */
   prune: {

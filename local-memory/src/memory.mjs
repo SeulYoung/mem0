@@ -1,12 +1,10 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import path from "node:path";
 
-import { loadConfig, rememberDimension } from "./config.mjs";
+import { DEFAULT_CONFIG, loadConfig, rememberDimension } from "./config.mjs";
 import { createEmbedder } from "./embedder.mjs";
 import { createLlm, resolveApiKey } from "./llm.mjs";
 import { PATHS, ensureDirs, log } from "./paths.mjs";
-import { GLOBAL_SCOPE } from "./project.mjs";
 import { rerankerConfig, rerankerReady } from "./reranker.mjs";
 
 /**
@@ -38,25 +36,6 @@ async function setWal(...files) {
       log("sqlite", `WAL setup skipped for ${file}: ${error.message}`);
     }
   }
-}
-
-/**
- * One history database per repository. mem0 keeps two things in there: the
- * change log, and the recent messages it replays into the extraction prompt as
- * `## Last k Messages`. That replay is scoped by user/agent/run only — never by
- * our project metadata — so a shared file would let one repository's prompts
- * steer what gets extracted in another. Separate files scope it by construction.
- */
-export function historyDbFor(project) {
-  if (!project?.id) return PATHS.historyDb;
-  const slug =
-    project.id
-      .toLowerCase()
-      .replace(/[^a-z0-9._-]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 48) || "project";
-  const digest = crypto.createHash("md5").update(project.id).digest("hex").slice(0, 8);
-  return path.join(PATHS.historyDir, `${slug}-${digest}.db`);
 }
 
 /**
@@ -98,12 +77,14 @@ export function memoryConfig({ config, embedder, llm, historyDbPath = PATHS.hist
 }
 
 let base;
-const instances = new Map();
+let instance;
 
 /** Everything that does not depend on which repository we are working in. */
 async function openBase() {
   if (base) return base;
   ensureDirs();
+  // Before any Memory is constructed, while nothing else holds the files:
+  // switching journal mode needs exclusive access.
   await setWal(PATHS.vectorDb, PATHS.vectorDb.replace(/\.db$/, "_entities.db"), PATHS.historyDb);
   // loadConfig() sets MEM0_TELEMETRY, and mem0 reads it once at module load —
   // so the import in openMemory must stay dynamic and stay after this line.
@@ -121,21 +102,22 @@ async function openBase() {
 }
 
 /**
- * A mem0 instance for one repository. Callers that write always pass a project;
- * read-only callers (stats, doctor) may omit it and share one instance.
+ * The one mem0 instance, shared by every repository.
+ *
+ * Which repository a call belongs to travels in the `agent_id` filter it passes,
+ * not in which instance it goes through — see `scopeFilters`. That is what
+ * allows a single instance and a single history database: mem0 keys the messages
+ * it replays into the extraction prompt (`## Last k Messages`) on the same
+ * field. While a repository was a metadata key of ours, mem0 could not see it,
+ * so isolation had to be bought with one instance and one history file each.
  */
-export async function openMemory(project) {
+export async function openMemory() {
   const shared = await openBase();
-  const key = project?.id ?? "__shared__";
-  if (!instances.has(key)) {
+  if (!instance) {
     const { Memory } = await import("mem0ai/oss");
-    const historyDbPath = historyDbFor(project);
-    // Before constructing, while nothing else holds the file: switching journal
-    // mode needs exclusive access.
-    await setWal(historyDbPath);
-    instances.set(key, new Memory(memoryConfig({ ...shared, historyDbPath })));
+    instance = new Memory(memoryConfig(shared));
   }
-  return { ...shared, memory: instances.get(key) };
+  return { ...shared, memory: instance };
 }
 
 /** Probe the embedder once and cache the dimension in config.json. */
@@ -153,7 +135,11 @@ function toRecord(item) {
   return {
     id: item.id,
     text: item.memory,
-    project: metadata.project ?? null,
+    // mem0 returns `agent_id` outside `metadata`, like the other identity keys.
+    // The fallback reads a record written before repositories moved into that
+    // field; those are invisible to every scoped read, so this is what lets
+    // `scope: "all"` and the migration script still account for them.
+    project: item.agent_id ?? metadata.project ?? null,
     projectName: metadata.project_name ?? null,
     kind: metadata.kind ?? null,
     source: metadata.source ?? null,
@@ -175,22 +161,33 @@ function toRecord(item) {
 }
 
 /**
- * Scope a query to this repository plus anything marked global. The filter is
- * handed to mem0 so it applies inside the store, before top-k truncation —
- * filtering afterwards would let other repositories crowd out the real hits.
- * Also used on writes, where mem0 searches existing memories to decide what is
- * new. `{ project: [...] }` is mem0's own "in" shorthand.
+ * Scope a query to one repository, as mem0's own `agent_id`.
+ *
+ * The repository used to be a metadata key of ours, which worked for the vector
+ * filter and for nothing else. `agent_id` is the field mem0 itself means "which
+ * workspace this belongs to" by, so naming it that way puts the repository
+ * boundary inside every mechanism mem0 has: the vector filter, the entity index
+ * it consults for the entity boost, and the session scope its message replay is
+ * keyed on. The price is that a memory can no longer be shared between
+ * repositories — an identity key is fixed at write time, and mem0 accepts one
+ * value per query, not a list.
+ *
+ * Handed to mem0 rather than applied afterwards so it takes effect inside the
+ * store, before top-k truncation. Also used on writes, where mem0 searches
+ * existing memories to decide what is new.
  */
 export function scopeFilters(config, project, scope) {
   const filters = { user_id: config.userId };
-  if (scope !== "all") filters.project = [project.id, GLOBAL_SCOPE];
+  if (scope === "all") return filters;
+  if (!project?.id) throw new Error("A repository is required to scope this call.");
+  filters.agent_id = project.id;
   return filters;
 }
 
 /** Second line of defence in case a future mem0 changes filter semantics. */
 function visibleIn(record, projectId, scope) {
   if (scope === "all") return true;
-  return record.project === projectId || record.project === GLOBAL_SCOPE;
+  return record.project === projectId;
 }
 
 /**
@@ -235,9 +232,9 @@ function assertKind(kind, config) {
 
 /**
  * Find the memory a given input produced, by the hash we stamped on it. mem0
- * applies filters inside the store, and arbitrary metadata keys work there —
- * `project` in `scopeFilters` is one of ours already — so this is a keyed lookup
- * and not a scan of the whole collection.
+ * applies filters inside the store, and arbitrary metadata keys work there
+ * alongside its own identity keys, so this is a keyed lookup and not a scan of
+ * the whole collection.
  *
  * Expired memories stay out on purpose: an expired memory is invisible
  * everywhere else, so letting one block a rewrite would make the input
@@ -249,6 +246,16 @@ async function findByInputHash(memory, filters, hash) {
 }
 
 /**
+ * How many of mem0's hits to consider when asking whether an existing memory
+ * already says this. More than one because mem0 orders by its *fused* score:
+ * a memory that shares the wording, or an entity, can outrank the one with the
+ * highest cosine, and the top row alone would then answer a different question
+ * than the one being asked. mem0 scans at least 60 rows for any small topK, so
+ * looking at ten of them costs nothing beyond the rows it already scored.
+ */
+const DEDUPE_WINDOW = 10;
+
+/**
  * The nearest existing memory, if it is close enough to count as a restatement.
  *
  * mem0 does this itself on its extraction path, where the model is shown the
@@ -257,23 +264,36 @@ async function findByInputHash(memory, filters, hash) {
  * without a model: embed the text and look at what it lands on top of.
  */
 async function findNearDuplicate(memory, filters, text, similarity) {
-  const raw = await memory.search(text, { filters, topK: 1, explain: true });
-  const [top] = raw?.results ?? [];
-  // `semanticScore` is the plain cosine between the two embeddings. The fused
-  // `score` beside it cannot be used for this: mem0 divides it by a factor that
-  // depends on which signals fired anywhere in the candidate set, so it moves
-  // for reasons that have nothing to do with this pair of texts.
-  const cosine = top?.score_details?.semanticScore;
-  if (typeof cosine !== "number" || cosine < similarity) return null;
-  return { record: toRecord(top), similarity: cosine };
+  const raw = await memory.search(text, { filters, topK: DEDUPE_WINDOW, explain: true });
+  // `semanticScore` is the plain cosine between the two embeddings, and the only
+  // figure that answers "do these two texts say the same thing". The fused
+  // `score` beside it cannot: mem0 divides it by a factor that depends on which
+  // signals fired anywhere in the candidate set, so it moves for reasons that
+  // have nothing to do with this pair of texts — which is also why the nearest
+  // neighbour has to be picked out of the list rather than read off the top.
+  let nearest = null;
+  for (const hit of raw?.results ?? []) {
+    const cosine = hit?.score_details?.semanticScore;
+    if (typeof cosine !== "number") continue;
+    if (!nearest || cosine > nearest.similarity) nearest = { record: toRecord(hit), similarity: cosine };
+  }
+  if (!nearest || nearest.similarity < similarity) return null;
+  return nearest;
 }
 
 export async function addMemory({
   text,
+  /**
+   * The conversation `text` came out of, as mem0's own `Message[]`. Used on the
+   * extraction path only, where mem0 renders it as `role: content` lines and lets
+   * the model mine facts out of both sides. Ignored everywhere else, because the
+   * verbatim path stores one memory *per message* — a whole agent reply would
+   * land in the store as a memory of its own.
+   */
+  messages = null,
   project,
   kind = "note",
   source = "mcp",
-  global = false,
   infer = false,
   expiresAt = null,
   dedupeKey = null,
@@ -281,8 +301,9 @@ export async function addMemory({
 }) {
   const trimmed = String(text ?? "").trim();
   if (!trimmed) throw new Error("Refusing to store an empty memory.");
+  if (!project?.id) throw new Error("A repository is required to store a memory.");
 
-  const { memory, config } = await openMemory(project);
+  const { memory, config } = await openMemory();
   assertKind(kind, config);
   const filters = scopeFilters(config, project, "project");
   const wantInfer = Boolean(infer) && Boolean(config.llm?.enabled);
@@ -331,15 +352,18 @@ export async function addMemory({
 
   const options = {
     userId: config.userId,
-    // Scope what mem0 compares against. Its extraction path searches existing
+    // Scope what mem0 compares against, and stamp the repository on the record:
+    // mem0 copies the identity keys out of `filters` onto the payload it writes,
+    // so `agent_id` is set by the same object that scopes the write. Which
+    // matters most on the extraction path, where mem0 searches existing
     // memories and hands the top hits to the model to decide what is genuinely
-    // new; unscoped, a memory from another repository could make it drop a fact
-    // this repository does not have. Same filter shape as search/getAll, applied
-    // by mem0 inside the store.
+    // new — unscoped, a memory from another repository could make it drop a fact
+    // this repository does not have.
     filters,
     metadata: {
-      project: global ? GLOBAL_SCOPE : project.id,
-      project_name: global ? GLOBAL_SCOPE : project.name,
+      // Display only, and deliberately not the id: every clone of a repository
+      // has the same folder name, so a name is not something to scope by.
+      project_name: project.name,
       kind,
       source,
       source_hash: inputHash,
@@ -351,8 +375,9 @@ export async function addMemory({
 
   let result;
   let inferred = wantInfer;
+  const input = wantInfer && Array.isArray(messages) && messages.length > 0 ? messages : trimmed;
   try {
-    result = await memory.add(trimmed, { ...options, infer: wantInfer });
+    result = await memory.add(input, { ...options, infer: wantInfer });
   } catch (error) {
     if (!wantInfer) throw error;
     // The model is optional infrastructure; the memory is not. Keep the text.
@@ -367,7 +392,7 @@ export async function addMemory({
   const stored = (result?.results ?? []).map((item) => {
     const record = toRecord(item);
     for (const [key, value] of Object.entries({
-      project: options.metadata.project,
+      project: project.id,
       projectName: options.metadata.project_name,
       kind: options.metadata.kind,
       source: options.metadata.source,
@@ -377,32 +402,37 @@ export async function addMemory({
     }
     return record;
   });
-  log(
-    "memory",
-    `add project=${global ? GLOBAL_SCOPE : project.id} kind=${kind} source=${source} infer=${inferred} stored=${stored.length}`,
-  );
+  log("memory", `add project=${project.id} kind=${kind} source=${source} infer=${inferred} stored=${stored.length}`);
   return stored;
 }
 
 export async function searchMemories({
   query,
   project,
-  topK = 6,
+  // Null rather than a number: how many memories a search returns is a
+  // configured policy (`search.topK`), and only a caller that says otherwise —
+  // the tool's own argument, `--top` — overrides it.
+  topK = null,
   scope = "project",
   explain = false,
   rerank = null,
   threshold = null,
 }) {
-  const { memory, config } = await openMemory(project);
+  const { memory, config } = await openMemory();
   await detectDimension();
+
+  const limit = topK ?? config.search?.topK ?? DEFAULT_CONFIG.search.topK;
 
   // The reranker only re-orders what the first stage already found, so ask mem0
   // for a wider set than the caller wants and let the cross-encoder choose from
   // it. Asking for exactly topK would rerank the one list we were going to
-  // return anyway, which is where reranking has the least to offer.
+  // return anyway, which is where reranking has the least to offer. The factor
+  // is mem0's own — it over-fetches `max(topK * 4, 60)` into the pool it fuses
+  // and scores — so the window widens with topK instead of being a constant that
+  // a large enough topK silently overtakes, taking the reranking with it.
   const wantRerank = rerank ?? Boolean(rerankerConfig(config));
   const reranking = wantRerank && (await rerankerReady());
-  const candidates = reranking ? Math.max(topK, config.reranker?.candidates ?? 25) : topK;
+  const candidates = reranking ? Math.max(limit * 4, config.reranker?.candidates ?? 25) : limit;
   const floor = threshold ?? config.search?.threshold;
 
   const raw = await memory.search(String(query ?? "").trim(), {
@@ -418,7 +448,7 @@ export async function searchMemories({
   return (raw?.results ?? [])
     .map(toRecord)
     .filter((record) => visibleIn(record, project.id, scope))
-    .slice(0, topK);
+    .slice(0, limit);
 }
 
 /**
@@ -440,7 +470,7 @@ const STORE_SCAN_LIMIT = 100000;
  * search alike, and nothing could name it again without its full uuid.
  */
 export async function listMemories({ project, limit = 10, scope = "project", includeExpired = false }) {
-  const { memory, config } = await openMemory(project);
+  const { memory, config } = await openMemory();
 
   const raw = await memory.getAll({
     filters: scopeFilters(config, project, scope),
@@ -515,44 +545,33 @@ export async function resolveMemoryId(id, project) {
 }
 
 /**
- * Which repository's mem0 instance should perform a write. mem0 logs a change
- * against whichever instance made it and we keep one history database per
- * repository, so editing a global memory from here would file its history under
- * this repository — and the same memory's history would end up scattered across
- * every repository that ever touched it. Route by owner instead.
- */
-function ownerOf(record, project) {
-  if (!record?.project || record.project === project?.id) return project;
-  return { id: record.project, name: record.projectName ?? record.project };
-}
-
-/**
  * Correct a memory in place. mem0 keeps the id and the original createdAt and
  * only refreshes updatedAt, so the record's place in the store — and in the
  * next session's injection — survives the edit. That is the whole point: the
  * alternative, deleting and re-adding, loses both.
+ *
+ * Which repository a memory belongs to is not editable here, and cannot be:
+ * mem0 runs `stripIdentityKeys` over the metadata an update supplies, so
+ * `agent_id` is fixed at write time. Re-keying a repository is therefore a
+ * maintenance job on the payloads themselves — `scripts/rekey-project.mjs`.
  */
-export async function updateMemory({ id, text, kind, expiresAt, scope, project }) {
+export async function updateMemory({ id, text, kind, expiresAt, project }) {
   const hasText = text !== undefined && text !== null;
   const hasKind = kind !== undefined && kind !== null;
-  const hasScope = scope !== undefined && scope !== null;
   // `null` is meaningful here — it is how mem0 clears an expiry — so only an
   // absent key counts as "leave it alone".
   const hasExpiry = expiresAt !== undefined;
-  if (!hasText && !hasKind && !hasExpiry && !hasScope) {
-    throw new Error("Nothing to update: provide text, kind, expiresAt or scope.");
-  }
-  if (hasScope && scope !== "project" && scope !== "global") {
-    throw new Error(`Unknown scope "${scope}". Use "project" or "global".`);
+  if (!hasText && !hasKind && !hasExpiry) {
+    throw new Error("Nothing to update: provide text, kind or expiresAt.");
   }
 
   const record = await resolveRecord(id, project);
   const memoryId = record.id;
-  const { memory, config } = await openMemory(ownerOf(record, project));
+  const { memory, config } = await openMemory();
   if (hasKind) assertKind(kind, config);
 
   // Only the keys being changed: mem0 merges this over the existing payload, so
-  // anything left out (project, source, an expiry set earlier) is preserved.
+  // anything left out (the repository, source, an expiry set earlier) is kept.
   const metadata = {};
   let trimmed;
   if (hasText) {
@@ -568,12 +587,6 @@ export async function updateMemory({ id, text, kind, expiresAt, scope, project }
     if (clash) throw new Error(`Memory ${clash.id.slice(0, 8)} already says exactly this; delete one of the two instead.`);
   }
   if (hasKind) metadata.kind = kind;
-  if (hasScope) {
-    // Moving scope in place is the only way to promote a repository memory to
-    // global without losing its id and its original date.
-    metadata.project = scope === "global" ? GLOBAL_SCOPE : project.id;
-    metadata.project_name = scope === "global" ? GLOBAL_SCOPE : project.name;
-  }
 
   await detectDimension();
   await memory.update(memoryId, {
@@ -585,7 +598,7 @@ export async function updateMemory({ id, text, kind, expiresAt, scope, project }
 
   log(
     "memory",
-    `update id=${memoryId} text=${hasText} kind=${hasKind ? kind : "-"} scope=${hasScope ? scope : "-"} expires=${hasExpiry ? (expiresAt ?? "cleared") : "-"}`,
+    `update id=${memoryId} text=${hasText} kind=${hasKind ? kind : "-"} expires=${hasExpiry ? (expiresAt ?? "cleared") : "-"}`,
   );
   // Read back rather than echo the request: `get` is the only path that shows
   // an expired memory, so it is also the only honest confirmation of one.
@@ -593,10 +606,45 @@ export async function updateMemory({ id, text, kind, expiresAt, scope, project }
   return updated ? toRecord(updated) : { id: memoryId };
 }
 
+/**
+ * What has happened to one memory, from mem0's own change log.
+ *
+ * mem0 appends a row on every ADD, UPDATE and DELETE — including the previous
+ * text — and never reads it back on its own, so this is the only way to see what
+ * a memory said before an edit. Which is the case it exists for: `updateMemory`
+ * replaces the text in place, and without this the old wording is gone as far as
+ * anyone can tell.
+ *
+ * The id is resolved against this repository exactly like an edit, even though
+ * this only reads. History rows carry the memory id and nothing else — no
+ * `agent_id` — so mem0 would happily return another repository's rows for a uuid
+ * picked up from a `scope: "all"` search.
+ */
+export async function historyMemory({ id, project }) {
+  const record = await resolveRecord(id, project);
+  const { memory } = await openMemory();
+  const rows = (await memory.history(record.id)) ?? [];
+  return {
+    record,
+    // mem0 returns newest first (`ORDER BY id DESC`), which is also the only
+    // reliable ordering here: the dates below do not say when the row was
+    // written. `created_at` is the memory's own creation time, repeated on every
+    // row; `updated_at` is set on UPDATE rows only; a DELETE row has neither.
+    entries: rows.map((row) => ({
+      action: row.action ?? null,
+      previous: row.previous_value ?? null,
+      next: row.new_value ?? null,
+      createdAt: row.created_at ?? null,
+      updatedAt: row.updated_at ?? null,
+      deleted: row.is_deleted === 1,
+    })),
+  };
+}
+
 export async function deleteMemory(id, project) {
   const record = project?.id ? await resolveRecord(id, project) : null;
   const memoryId = record ? record.id : await resolveMemoryId(id, project);
-  const { memory } = await openMemory(ownerOf(record, project));
+  const { memory } = await openMemory();
   await memory.delete(memoryId);
   log("memory", `delete id=${memoryId}`);
   return { id: memoryId, deleted: true };

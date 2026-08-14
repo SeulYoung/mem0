@@ -62,6 +62,13 @@ try {
   check("a shortened id from the listing is enough to update", updated.includes(corrected), updated.split("\n")[0]);
   check("the update moved the memory to the new kind", updated.includes("[gotcha]"));
 
+  // The one thing an in-place edit destroys is the previous wording, and mem0's
+  // change log is the only copy of it.
+  const history = cli("history", shortId);
+  check("history shows the text the update replaced", history.includes(`was  ${BODY}`), history.split("\n")[0]);
+  check("history shows the text it was replaced with", history.includes(`now  ${corrected}`));
+  check("history keeps the write that created it", /\bADD\b/.test(history) && /\bUPDATE\b/.test(history));
+
   const expired = cli("update", shortId, "--expires", "2020-01-01");
   check("--expires is recorded on the memory", expired.includes("expires=2020-01-01"));
   check("an expired memory disappears from the listing", !cli("list", "--limit", "50").includes(corrected));

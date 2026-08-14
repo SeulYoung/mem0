@@ -12,6 +12,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 
 import { ensureConfigFile } from "./config.mjs";
 import { describeChanges, fingerprint, readHeartbeat, recordToolFailure, writeHeartbeat } from "./health.mjs";
+import { flushStaleTurns } from "./hooks/_turn-store.mjs";
 import { buildInjectionText } from "./injection.mjs";
 import { isNestedAgentInvocation, isNestedAgentWorkspace } from "./llm.mjs";
 import {
@@ -52,7 +53,7 @@ const config = ensureConfigFile();
 const SCOPE_READ = {
   type: "string",
   enum: ["project", "all"],
-  description: 'Search this repository plus global memories ("project", default) or every repository ("all").',
+  description: 'Search this repository ("project", default) or every repository ("all").',
 };
 
 /**
@@ -74,7 +75,7 @@ const KIND_DESCRIPTION = [
 const MEMORY_ID = {
   type: "string",
   description:
-    "Memory id from memory_search, memory_list, or the list injected at the start of this session. The shortened eight-character form shown there is enough. Must name a memory belonging to this repository (or a global one) — memories owned by another repository are readable with scope \"all\" but can only be changed from the repository that owns them.",
+    "Memory id from memory_search, memory_list, or the list injected at the start of this session. The shortened eight-character form shown there is enough. Must name a memory belonging to this repository — memories owned by another repository are readable with scope \"all\" but can only be changed from the repository that owns them.",
 };
 
 const TOOLS = [
@@ -90,7 +91,12 @@ const TOOLS = [
           description:
             "Natural-language description of what you are looking for, in English — memories are stored in English and retrieval is English-only, so translate the user's wording rather than passing it through. Keep identifiers, file names and command names exactly as they appear: they are what the keyword and entity signals match on.",
         },
-        topK: { type: "integer", minimum: 1, maximum: 25, description: "How many memories to return (default 6)." },
+        topK: {
+          type: "integer",
+          minimum: 1,
+          maximum: 50,
+          description: `How many memories to return (default ${config.search.topK}). Raise it when the first answer looks incomplete; the results are ordered, so the extra ones are weaker matches rather than more of the same.`,
+        },
         scope: SCOPE_READ,
       },
       required: ["query"],
@@ -109,12 +115,6 @@ const TOOLS = [
             "The memory, as one self-contained English statement, opening with the topic it is about. Write English even when the conversation is in another language: retrieval is English-only, and a memory in another language is close to unreachable. Keep identifiers, file names, paths and command names exactly as they appear in the source.",
         },
         kind: { type: "string", enum: KINDS, description: KIND_DESCRIPTION },
-        scope: {
-          type: "string",
-          enum: ["project", "global"],
-          description:
-            'Store against this repository ("project", default) or make it visible everywhere ("global") — use global only for habits that are not repository-specific.',
-        },
         distil: {
           type: "boolean",
           description:
@@ -170,12 +170,6 @@ const TOOLS = [
           enum: KINDS,
           description: "Move the memory to a different category, judged by the same tests memory_add lists.",
         },
-        scope: {
-          type: "string",
-          enum: ["project", "global"],
-          description:
-            "Move the memory between this repository and everywhere. Use it when a fact turns out to be a general habit rather than a property of this repository, or the reverse — re-adding it under the other scope would lose its id and its original date.",
-        },
         expiresAt: {
           type: ["string", "null"],
           description:
@@ -206,7 +200,7 @@ async function runTool(name, args) {
       const results = await searchMemories({
         query: args.query,
         project,
-        topK: args.topK ?? 6,
+        topK: args.topK ?? null,
         scope: args.scope ?? "project",
       });
       return { project: project.id, count: results.length, results };
@@ -217,7 +211,6 @@ async function runTool(name, args) {
         project,
         kind: args.kind ?? "note",
         source: "mcp",
-        global: args.scope === "global",
         infer: args.distil === true,
         expiresAt: args.expiresAt ?? null,
         dedupe: args.force !== true,
@@ -225,7 +218,7 @@ async function runTool(name, args) {
       return {
         stored: stored.length,
         ids: stored.map((record) => record.id),
-        scope: args.scope ?? "project",
+        project: project.id,
         // 0 with distil means the model judged it already covered by an existing memory.
         ...(stored.length === 0 ? { note: "Nothing stored — an equivalent memory already exists." } : {}),
       };
@@ -244,7 +237,6 @@ async function runTool(name, args) {
         id: args.id,
         text: args.text,
         kind: args.kind,
-        scope: args.scope,
         expiresAt: args.expiresAt,
         project,
       });
@@ -313,9 +305,20 @@ async function startUp() {
   }
 
   // A probe run is not evidence that anything real happened, so it must not
-  // leave a heartbeat behind for the watchdog to trust.
+  // leave a heartbeat behind for the watchdog to trust — nor write memories.
   if (process.env.MEM0_LOCAL_PROBE !== "1") {
     writeHeartbeat({ project: project.id, root: project.root, store, memories, changes });
+    // Turns whose `stop` never arrived. `sessionStart` does this too, but that
+    // hook only runs in Cursor: without this line a turn parked in Cursor and
+    // then abandoned would wait for the next Cursor session, however long you
+    // spend in an ACP host. Every host starts this server, so this is the one
+    // claim path that is host-independent.
+    try {
+      const stale = flushStaleTurns((config.capture?.turnTimeoutMinutes ?? 120) * 60 * 1000);
+      if (stale > 0) log("mcp", `flushed ${stale} unfinished turn(s)`);
+    } catch (error) {
+      log("mcp", `could not flush unfinished turns: ${error.message}`);
+    }
   }
 
   return instructions;

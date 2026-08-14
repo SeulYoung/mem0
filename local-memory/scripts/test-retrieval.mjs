@@ -11,8 +11,8 @@
  *     one really fires when it should
  *   - the entity store gets built, populated and linked
  *   - our metadata and mem0's `attributedTo` survive a round trip
- *   - the entity index is shared across repositories (mem0 scopes it by user),
- *     yet no other repository's memory can reach our results
+ *   - the repository lands in mem0's own `agent_id`, and that is what keeps one
+ *     repository's memories — and its entities — out of another's results
  *   - reads may cross repositories but writes may not, even when the caller
  *     names a memory by the full uuid a cross-repository read just handed it
  *   - mem0's cross-encoder reranker runs, re-orders, and reports its score, and
@@ -21,14 +21,11 @@
  *     what it means, the second one loudly enough to name the memory it hit
  *   - an expiry set at write time hides the memory the way mem0 hides one
  */
-import fs from "node:fs";
-
 import { loadConfig } from "../src/config.mjs";
 import { createEmbedder } from "../src/embedder.mjs";
 import {
   addMemory,
   deleteMemory,
-  historyDbFor,
   listMemories,
   memoryConfig,
   routeConsoleToStderr,
@@ -75,31 +72,17 @@ function stubModel(text, attributedTo) {
 async function writeViaExtraction(project, text, attributedTo, kind) {
   const { Memory } = await import("mem0ai/oss");
   const memory = new Memory(
-    memoryConfig({
-      config,
-      embedder: createEmbedder(config),
-      llm: stubModel(text, attributedTo),
-      historyDbPath: historyDbFor(project),
-    }),
+    memoryConfig({ config, embedder: createEmbedder(config), llm: stubModel(text, attributedTo) }),
   );
+  // Built the way addMemory builds a write: the repository travels in the
+  // filters, which is where mem0 picks `agent_id` up from and stamps it on the
+  // record it stores.
   return memory.add(`请记住：${text}`, {
     userId: config.userId,
     filters: scopeFilters(config, project, "project"),
-    metadata: { project: project.id, project_name: project.name, kind, source: "test:retrieval" },
+    metadata: { project_name: project.name, kind, source: "test:retrieval" },
     infer: true,
   });
-}
-
-function cleanHistory() {
-  for (const project of [repoOne, repoTwo]) {
-    for (const suffix of ["", "-wal", "-shm"]) {
-      try {
-        fs.rmSync(`${historyDbFor(project)}${suffix}`, { force: true });
-      } catch {
-        // still locked by a live process; the next run clears it
-      }
-    }
-  }
 }
 
 async function wipe() {
@@ -118,10 +101,10 @@ const store = (text, extra) =>
   addMemory({ text, project: repoOne, kind: "note", source: "test:retrieval", ...extra });
 
 /**
- * The fixtures only. Every read here is scoped to one repository plus whatever is
- * marked global, and a real global memory is entitled to show up in any of these
- * results, so anything asserting on *which* memories came back has to say which
- * ones are ours.
+ * The fixtures only. Reads are scoped to one repository, so in a store used for
+ * real this is normally everything that comes back — but a `scope: "all"` read
+ * and the reranker's wider candidate set both reach past that, so anything
+ * asserting on *which* memories came back has to say which ones are ours.
  */
 const mine = (records) => records.filter((record) => record.project === repoOne.id);
 
@@ -236,7 +219,6 @@ async function checkExpiryOnWrite() {
 }
 
 try {
-  cleanHistory();
   await wipe();
 
   const written = await writeViaExtraction(repoOne, FACT_ONE, "user", "convention");
@@ -303,8 +285,9 @@ try {
     `semanticScore=${chineseHit.semanticScore}`,
   );
 
-  // Same identifier in another repository: mem0 scopes the entity index by user
-  // only, so its entity record now links memories from both. Results must not.
+  // Same identifier in another repository. mem0 scopes the entity index by the
+  // same `agent_id` as the memories, so the two repositories now have an entity
+  // row each for one identifier — and neither search may see the other's.
   await writeViaExtraction(repoTwo, FACT_TWO, "user", "convention");
   const afterNeighbour = await searchMemories({
     query: `${IDENTIFIER} 怎么用`,
@@ -313,12 +296,12 @@ try {
     explain: true,
   });
   check(
-    "a shared entity index does not leak the other repository's memory",
+    "the other repository's memory does not reach these results",
     afterNeighbour.every((record) => record.project !== repoTwo.id),
     JSON.stringify(afterNeighbour.map((r) => r.project)),
   );
   check(
-    "the entity signal still works after the index is shared",
+    "the entity signal still fires once two repositories share an identifier",
     (signals(mine(afterNeighbour)[0]).entityBoost ?? 0) > 0,
     `entityBoost=${signals(mine(afterNeighbour)[0]).entityBoost}`,
   );
@@ -360,11 +343,20 @@ try {
   check("the other repository's memory is untouched", survivor?.text === neighbour.text, survivor?.text);
 
   // Same memory, named from the repository that owns it: the ban is on reaching
-  // across, not on editing.
-  const moved = await updateMemory({ id: neighbour.id.slice(0, 8), project: repoTwo, scope: "global" });
-  check("its owner can still move it to global scope", moved.project === "global", `project=${moved.project}`);
-  const backHome = await updateMemory({ id: neighbour.id.slice(0, 8), project: repoTwo, scope: "project" });
-  check("and move it back, keeping its id", backHome.project === repoTwo.id && backHome.id === neighbour.id);
+  // across, not on editing. The edit must also leave the memory where it is —
+  // mem0 merges an update over the existing payload and strips identity keys out
+  // of the metadata it is handed, which is what keeps `agent_id` put, and is
+  // also why re-keying a repository has to be a payload-level job.
+  const edited = await updateMemory({
+    id: neighbour.id.slice(0, 8),
+    project: repoTwo,
+    text: `Rewritten by the repository that owns it, still about ${IDENTIFIER}.`,
+  });
+  check(
+    "its owner can edit it, and the edit keeps the id, the date and the repository",
+    edited.id === neighbour.id && edited.project === repoTwo.id && edited.createdAt === neighbour.createdAt,
+    `project=${edited.project} id=${edited.id.slice(0, 8)}`,
+  );
 
   await wipe();
   await checkReranking();
@@ -375,8 +367,10 @@ try {
 
   out(failures === 0 ? "\nRetrieval features verified." : `\n${failures} check(s) failed.`);
 } finally {
+  // The fixtures are deleted; the messages mem0 replays are not. They live in
+  // the shared history database under this test's own `agent_id`, where mem0
+  // keeps the ten newest per scope and no repository can see another's.
   await wipe();
-  cleanHistory();
 }
 
 process.exit(failures === 0 ? 0 : 1);

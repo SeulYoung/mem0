@@ -15,8 +15,14 @@ export const PATHS = {
   home: HOME,
   configFile: path.join(HOME, "config.json"),
   vectorDb: path.join(HOME, "vectors.db"),
+  /**
+   * mem0's change log, plus the recent messages it replays into the extraction
+   * prompt. One file for every repository: mem0 keys that replay on the same
+   * `agent_id` the memories are scoped by, so nothing crosses between them.
+   * Installs from before that carry a `history/` directory of per-repository
+   * files, which nothing reads any more and which can be deleted.
+   */
   historyDb: path.join(HOME, "history.db"),
-  historyDir: path.join(HOME, "history"),
   modelCache: path.join(HOME, "models"),
   /**
    * The reranker's model, kept apart because a different library downloads it:
@@ -25,6 +31,14 @@ export const PATHS = {
    */
   rerankerCache: path.join(HOME, "models", "transformers"),
   queueDir: path.join(HOME, "queue"),
+  /**
+   * One file per conversation, holding the turn currently in flight: the prompt
+   * written when you sent it, plus the agent's replies as they complete. A turn
+   * only lives here until `stop` hands it to the queue, so a file left behind is
+   * a turn whose end never arrived — `doctor` reports those and the next prompt
+   * in that conversation (or the next session) flushes them.
+   */
+  turnsDir: path.join(HOME, "turns"),
   logDir: path.join(HOME, "logs"),
   logFile: path.join(HOME, "logs", "mem0-local.log"),
   /**
@@ -42,7 +56,7 @@ export const PATHS = {
 };
 
 export function ensureDirs() {
-  for (const dir of [PATHS.home, PATHS.historyDir, PATHS.modelCache, PATHS.queueDir, PATHS.logDir]) {
+  for (const dir of [PATHS.home, PATHS.modelCache, PATHS.queueDir, PATHS.turnsDir, PATHS.logDir]) {
     fs.mkdirSync(dir, { recursive: true });
   }
 }

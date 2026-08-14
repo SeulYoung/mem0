@@ -20,7 +20,6 @@ import { loadConfig } from "../src/config.mjs";
 import {
   addMemory,
   deleteMemory,
-  historyDbFor,
   listMemories,
   memoryConfig,
   routeConsoleToStderr,
@@ -78,14 +77,11 @@ async function checkExtractionScope() {
     },
   };
   const embedder = createEmbedder(config);
-  // Built exactly like the real instances, per project, so the history database
-  // (which is where mem0 keeps the messages it replays) is scoped the same way.
-  const probes = new Map(
-    [projectA, projectB].map((project) => [
-      project.id,
-      new Memory(memoryConfig({ config, embedder, llm: recorder, historyDbPath: historyDbFor(project) })),
-    ]),
-  );
+  // One instance for both repositories, exactly like the real thing. That is the
+  // property under test: with the repository carried as mem0's `agent_id`, the
+  // messages mem0 replays are keyed on it too, so a single history database is
+  // still scoped per repository — no instance or file per repository needed.
+  const probe = new Memory(memoryConfig({ config, embedder, llm: recorder }));
 
   const PLANTED = "项目 ALPHA 的灰度开关叫 alpha_rollout_7788，只能由发布负责人改动。";
   const planted = await addMemory({
@@ -102,10 +98,10 @@ async function checkExtractionScope() {
 
   const askedFor = async (project) => {
     prompts.length = 0;
-    await probes.get(project.id).add(INPUT, {
+    await probe.add(INPUT, {
       userId: config.userId,
       filters: scopeFilters(config, project, "project"),
-      metadata: { project: project.id, project_name: project.name, kind: "convention", source: "test:llm" },
+      metadata: { project_name: project.name, kind: "convention", source: "test:llm" },
       infer: true,
     });
     return prompts.join("\n");
@@ -130,7 +126,7 @@ async function checkExtractionScope() {
   check(
     "replayed messages exclude another repository's prompts",
     !section(forB, "Last k Messages").includes("值班同学"),
-    "mem0 replays recent messages into the prompt, scoped only by user — hence one history database per repository",
+    "mem0 replays recent messages keyed on user + agent_id, from one shared history database",
   );
   const at = forB.indexOf("alpha_rollout_7788");
   check(
@@ -138,26 +134,62 @@ async function checkExtractionScope() {
     at < 0,
     at < 0 ? "" : `found at ${at}: ...${forB.slice(Math.max(0, at - 240), at + 60)}...`,
   );
+
+  await checkTurnReachesExtraction(probe, prompts);
 }
 
-/** Remove per-project history databases created by the tests. */
-function cleanHistory() {
-  for (const project of [projectA, projectB]) {
-    const file = historyDbFor(project);
-    for (const suffix of ["", "-wal", "-shm"]) {
-      try {
-        fs.rmSync(`${file}${suffix}`, { force: true });
-      } catch {
-        // still open on Windows; harmless leftovers
-      }
-    }
-  }
+/**
+ * A captured turn is a `[user, assistant]` pair, and the conclusion usually sits
+ * in the reply — so what matters is that mem0's extraction prompt actually shows
+ * the model both sides. Asserted against the same builder the capture worker
+ * uses, with the recording stub in place of the real model, so it costs nothing.
+ */
+async function checkTurnReachesExtraction(probe, prompts) {
+  const { turnDedupeKey, turnMessages } = await import("../src/hooks/_turn-store.mjs");
+
+  const QUESTION = "这次构建为什么失败了？";
+  const HEAD = "我先看一下日志。".repeat(40);
+  const CONCLUSION = "结论：失败原因是 shader 缓存过期，构建前必须先跑 clear-shader-cache-3311.bat。";
+
+  const messages = turnMessages({ prompt: QUESTION, responses: [HEAD, CONCLUSION] }, 300);
+  check("a turn with no reply is not a conversation", turnMessages({ prompt: QUESTION, responses: [] }, 300) === null);
+  check(
+    "the reply is capped from the tail, where the conclusion is",
+    messages[1].content.includes(CONCLUSION) && !messages[1].content.includes(HEAD),
+    `${messages[1].content.length} chars kept`,
+  );
+
+  // The duplicate guard runs before mem0 sees anything, so what it keys on
+  // decides which turns mem0 is allowed to mine. A better answer to a question
+  // already asked is a new input, not a replay.
+  const better = turnMessages({ prompt: QUESTION, responses: ["结论：其实是 shader 编译超时，跟缓存无关。"] }, 300);
+  check(
+    "the same question answered differently is a new input",
+    turnDedupeKey(QUESTION, messages) !== turnDedupeKey(QUESTION, better),
+  );
+  check(
+    "an identical turn replayed still costs nothing",
+    turnDedupeKey(QUESTION, messages) ===
+      turnDedupeKey(QUESTION, turnMessages({ prompt: QUESTION, responses: [HEAD, CONCLUSION] }, 300)),
+  );
+
+  prompts.length = 0;
+  await probe.add(messages, {
+    userId: config.userId,
+    filters: scopeFilters(config, projectB, "project"),
+    metadata: { project_name: projectB.name, kind: "prompt", source: "test:llm" },
+    infer: true,
+  });
+  const prompt = prompts.join("\n");
+  check("the extraction prompt carries the user's question", prompt.includes(QUESTION));
+  check(
+    "the extraction prompt carries the agent's answer",
+    prompt.includes("clear-shader-cache-3311.bat"),
+    "without this the model only ever sees one side of the turn",
+  );
 }
 
 try {
-  // Start from a clean slate: SQLite files stay locked until the process that
-  // opened them exits, so a previous run's teardown may not have removed them.
-  cleanHistory();
   for (const project of [projectA, projectB]) {
     for (const record of await listMemories({ project, limit: 100, scope: "project" })) {
       await deleteMemory(record.id, project);
@@ -179,7 +211,6 @@ try {
       created.push(record.id);
     }
   }
-  cleanHistory();
   show("cleaned up", [...new Set(created)]);
 }
 
@@ -206,15 +237,13 @@ async function checkModelHonoursSchema() {
     },
   };
 
-  const memory = new Memory(
-    memoryConfig({ config, embedder: createEmbedder(config), llm: spy, historyDbPath: historyDbFor(projectB) }),
-  );
+  const memory = new Memory(memoryConfig({ config, embedder: createEmbedder(config), llm: spy }));
   const result = await memory.add(
     "顺便记一下：这个仓库的资源打包统一走 cook-assets.ps1，别直接调 UnrealPak。",
     {
       userId: config.userId,
       filters: scopeFilters(config, projectB, "project"),
-      metadata: { project: projectB.id, project_name: projectB.name, kind: "convention", source: "test:llm" },
+      metadata: { project_name: projectB.name, kind: "convention", source: "test:llm" },
       infer: true,
     },
   );

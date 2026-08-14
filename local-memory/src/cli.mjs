@@ -4,11 +4,12 @@
  * prune without going through Cursor.
  *
  *   node src/cli.mjs doctor
- *   node src/cli.mjs add "..." [--kind preference] [--global] [--expires 2026-12-31] [--force]
+ *   node src/cli.mjs add "..." [--kind preference] [--expires 2026-12-31] [--force]
  *   node src/cli.mjs search "..." [--all] [--top 5] [--explain] [--no-rerank]
  *   node src/cli.mjs list [--all] [--limit 20]
  *   node src/cli.mjs stats
- *   node src/cli.mjs update <id> ["new text"] [--kind k] [--scope global] [--expires 2026-12-31] [--clear-expiry]
+ *   node src/cli.mjs update <id> ["new text"] [--kind k] [--expires 2026-12-31] [--clear-expiry]
+ *   node src/cli.mjs history <id>
  *   node src/cli.mjs delete <id>
  *   node src/cli.mjs prune --kind prompt --days 30 [--yes]
  *   node src/cli.mjs prune --expired [--days 30] [--yes]
@@ -33,6 +34,7 @@ import {
   KINDS,
   addMemory,
   deleteMemory,
+  historyMemory,
   listMemories,
   openMemory,
   routeConsoleToStderr,
@@ -62,7 +64,6 @@ const command = argv[0];
 // keep its query instead of consuming it as the value of `--all`.
 const SWITCHES = new Set([
   "all",
-  "global",
   "explain",
   "infer",
   "yes",
@@ -222,6 +223,26 @@ async function doctor() {
     : [];
   out(`failed captures     ${failed.length === 0 ? "none" : `${failed.length} in ${PATHS.queueDir}`}`);
 
+  // A turn parked here is a prompt that has not been recorded yet. One or two is
+  // normal (a conversation with a reply still coming); a pile means `stop` is not
+  // firing, and every one of them is a memory not taken.
+  if (config.capture?.includeResponse !== false) {
+    const parked = fs.existsSync(PATHS.turnsDir)
+      ? fs.readdirSync(PATHS.turnsDir).filter((name) => name.endsWith(".ndjson"))
+      : [];
+    const timeout = config.capture?.turnTimeoutMinutes ?? 120;
+    const stale = parked.filter((name) => {
+      try {
+        return Date.now() - fs.statSync(path.join(PATHS.turnsDir, name)).mtimeMs > timeout * 60 * 1000;
+      } catch {
+        return false;
+      }
+    });
+    let state = parked.length === 0 ? "none" : `${parked.length} in flight`;
+    if (stale.length > 0) state += `, ${stale.length} past the ${timeout}-minute timeout`;
+    out(`turns awaiting end  ${state}`);
+  }
+
   reportHealth();
   out(`log file            ${PATHS.logFile}`);
 }
@@ -324,7 +345,7 @@ switch (command) {
     const text = positional.join(" ");
     if (!text) {
       throw new Error(
-        'Usage: node src/cli.mjs add "the memory text" [--kind preference] [--global] [--infer] [--expires YYYY-MM-DD] [--force]',
+        'Usage: node src/cli.mjs add "the memory text" [--kind preference] [--infer] [--expires YYYY-MM-DD] [--force]',
       );
     }
     const stored = await addMemory({
@@ -332,7 +353,6 @@ switch (command) {
       project,
       kind: flag("kind", "note"),
       source: "cli",
-      global: Boolean(flag("global", false)),
       infer: Boolean(flag("infer", false)),
       expiresAt: flag("expires", null),
       dedupe: !flag("force", false),
@@ -348,11 +368,13 @@ switch (command) {
       );
     }
     const threshold = flag("threshold", null);
+    const top = flag("top", null);
     renderRecords(
       await searchMemories({
         query,
         project,
-        topK: Number(flag("top", 6)),
+        // Null leaves `search.topK` in charge, like the memory_search tool does.
+        topK: top === null ? null : Number(top),
         scope,
         explain: Boolean(flag("explain", false)),
         // Both null unless asked for, which is what leaves the configured
@@ -382,10 +404,9 @@ switch (command) {
     const text = positional.slice(1).join(" ");
     const kind = flag("kind", undefined);
     const expires = flag("expires", undefined);
-    const newScope = flag("scope", undefined);
-    if (!id || (!text && !kind && !expires && !newScope && !flag("clear-expiry", false))) {
+    if (!id || (!text && !kind && !expires && !flag("clear-expiry", false))) {
       throw new Error(
-        'Usage: node src/cli.mjs update <id> ["new text"] [--kind k] [--scope global] [--expires YYYY-MM-DD] [--clear-expiry]',
+        'Usage: node src/cli.mjs update <id> ["new text"] [--kind k] [--expires YYYY-MM-DD] [--clear-expiry]',
       );
     }
     renderRecords([
@@ -394,10 +415,33 @@ switch (command) {
         project,
         ...(text ? { text } : {}),
         ...(kind ? { kind } : {}),
-        ...(newScope ? { scope: newScope } : {}),
         ...(flag("clear-expiry", false) ? { expiresAt: null } : expires ? { expiresAt: expires } : {}),
       }),
     ]);
+    break;
+  }
+  case "history": {
+    const id = positional[0];
+    if (!id) throw new Error("Usage: node src/cli.mjs history <id>");
+    const { record, entries } = await historyMemory({ id, project });
+    // The full uuid, unlike everywhere else: this is where you would copy it out
+    // of, having found the memory by its short id.
+    out(`${record.id}  [${record.kind ?? "note"}] ${record.projectName ?? "-"}\n    ${record.text}`);
+    // mem0 writes an ADD row for every memory it stores, so an empty log has
+    // only one cause: this memory was written before the current history file.
+    // Installs from before repositories became `agent_id` kept one change log
+    // per repository, and those files are still there, unread.
+    if (entries.length === 0) {
+      out(`\n(nothing recorded in ${PATHS.historyDb} — this memory predates it,`);
+      out(`and its rows are in the per-repository files under ${path.join(PATHS.home, "history")})`);
+    }
+    for (const entry of entries) {
+      // Only an UPDATE row records when it happened. An ADD row carries the
+      // memory's creation date, and a DELETE row carries no date at all.
+      out(`\n${entry.action}  ${entry.updatedAt ?? entry.createdAt ?? "(no date recorded)"}`);
+      if (entry.previous) out(`  was  ${entry.previous}`);
+      if (entry.next) out(`  now  ${entry.next}`);
+    }
     break;
   }
   case "delete": {
@@ -429,7 +473,7 @@ switch (command) {
         "Local memory CLI",
         "",
         "  doctor                          health check of store, embedder, model and Cursor wiring",
-        '  add "text" [--kind k] [--global] [--infer] [--expires YYYY-MM-DD] [--force]',
+        '  add "text" [--kind k] [--infer] [--expires YYYY-MM-DD] [--force]',
         "                                  store a memory (--infer distils it through the model,",
         "                                  --force stores it despite a near-identical existing one)",
         `                                  kinds: ${KINDS.join(" | ")} — see DESIGN.md for what each one means`,
@@ -437,8 +481,10 @@ switch (command) {
         "                                  search; --explain shows each retrieval signal",
         "  list [--all] [--limit n] [--expired]   newest memories first; --expired also shows expired ones",
         "  stats                           counts by repository and kind",
-        '  update <id> ["new text"] [--kind k] [--scope global] [--expires YYYY-MM-DD] [--clear-expiry]',
+        '  update <id> ["new text"] [--kind k] [--expires YYYY-MM-DD] [--clear-expiry]',
         "                                  correct a memory in place, keeping its id and original date",
+        "  history <id>                    every change mem0 recorded for one memory, newest first,",
+        "                                  including the text an update replaced",
         "  delete <id>                     delete one memory owned by this repository",
         "  prune [--kind prompt] [--days 30] [--yes]   drop captured prompts older than --days",
         "  prune --expired [--days 30] [--yes]         drop memories expired for that many days",

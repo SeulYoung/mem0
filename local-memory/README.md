@@ -6,7 +6,7 @@
 - **无 Docker、无 Python、无 Ollama**：只要 Node ≥ 20
 - **记忆数据永不出本机**：本地 ONNX 嵌入模型 + 本地 SQLite 向量库
 - **总结模型走 Cursor CLI**（默认 `claude-sonnet-5-low`），把啰嗦的 prompt 提炼成干净事实；关一个开关就回到全离线的原文存储
-- 记忆按仓库隔离，同时支持跨仓库的「全局」记忆
+- **记忆按仓库隔离**，用的是 mem0 自己的 `agent_id`，所以向量过滤、实体索引、消息回放三处一起隔离（见 [DESIGN.md](DESIGN.md#仓库标识就是-mem0-的-agent_id)）
 
 **这份文档只讲"怎么装、怎么用、怎么配"。** 每个决定背后的取舍和证据（为什么记忆存英文、为什么总结走 CLI 而不是 baseURL、为什么巡检要主动起服务、`kind` 各类别的判据、与 mem0 的边界和上游已知问题）都在 **[DESIGN.md](DESIGN.md)**；每个实现细节的"这行为什么这么写"只在代码注释里——`src/config.mjs` 是配置项的唯一权威说明。
 
@@ -16,7 +16,9 @@
 Cursor / JetBrains 等 ACP 宿主（任意工程）
 ├── hooks（~/.cursor/hooks.json）           确定性；但只有 Cursor 自己执行
 │   ├── sessionStart        → 读取本仓库记忆，注入到会话初始上下文
-│   └── beforeSubmitPrompt  → 记录你的每条 prompt（立即返回，写入在后台进程完成）
+│   ├── beforeSubmitPrompt  → 暂存你这条 prompt，立刻放行
+│   ├── afterAgentResponse  → 把 AI 的回答追加到同一轮
+│   └── stop                → 一轮结束，prompt + 回答一起交给后台进程写入
 │
 └── MCP server（~/.cursor/mcp.json）        供 AI 主动读写，并在握手时注入记忆
     ├── instructions        → 同一份记忆 + 协议，宿主无关
@@ -32,9 +34,11 @@ Cursor / JetBrains 等 ACP 宿主（任意工程）
                     ▼
         ~/.mem0-local/          ← 数据目录，独立于本仓库
         ├── config.json         配置
-        ├── vectors.db          记忆本体
-        ├── history/            每个仓库一个变更历史库
+        ├── vectors.db          记忆本体（vectors_entities.db 是实体索引）
+        ├── history.db          变更历史 + mem0 回放的最近消息
         ├── models/             嵌入模型（约 50MB）+ transformers/ 重排模型（约 87MB）
+        ├── queue/              等待后台写入的轮次（失败的留成 *.failed）
+        ├── turns/              正在进行中的那一轮（每个会话一个文件，写完即删）
         ├── llm-workspace/      总结模型的空白工作区（只读、与任何仓库隔离）
         ├── llm-usage.json      今日模型调用计数（配额保护）
         ├── heartbeat.json      上一次真实会话的环境指纹
@@ -60,7 +64,7 @@ node src/cli.mjs doctor           # 自检
 
 然后**重启 Cursor**（或 Reload Window）。安装脚本只新增自己的条目，已有的 MCP server 和 hooks 都保留，且每次写入前自动备份为 `*.bak-<时间戳>`。
 
-验证：Cursor Settings → MCP 里能看到 `mem0-local` 的 6 个工具；Customize → Hooks 里能看到两个 hook。想用总结模型还需要 Cursor CLI 处于登录状态（`cursor-agent status`）；不想用就把 `llm.enabled` 设成 `false`。
+验证：Cursor Settings → MCP 里能看到 `mem0-local` 的 6 个工具；Customize → Hooks 里能看到四个 hook（`sessionStart` 注入，`beforeSubmitPrompt` / `afterAgentResponse` / `stop` 合起来记录一轮对话）。想用总结模型还需要 Cursor CLI 处于登录状态（`cursor-agent status`）；不想用就把 `llm.enabled` 设成 `false`。
 
 用环境变量存 Cursor 凭据的话（`llm.apiKey` 默认就是 `env:CURSOR_API_KEY`），要设成用户级永久变量，重启 Cursor 后 hook 子进程才继承得到：
 
@@ -82,16 +86,50 @@ node scripts/test-hooks.mjs D:\UGit\HappyArenaTMR\HappyArena
 
 - **项目 id 来自 git remote，不是文件夹名。** 例如上例的 remote 是 `.../fortunegame/FTBattle.git`，所以 id 是 `fortunegame/ftbattle`，显示名才是 `HappyArena`。用 remote 是有意的：换盘符、改文件夹名、重新 clone，记忆都还在。没有 remote 的目录退回"文件夹名 + 路径哈希"。
 - **嵌套仓库要注意打开哪一层。** 上例里 `HappyArenaTMR` 和它下面的 `HappyArena` 各自都是 git 仓库，在 Cursor 里打开哪个目录作为工作区就落到哪个仓库的记忆里，两者不互通。
-- 工程自己的 `.cursor/hooks.json` 不会和这套冲突（Cursor 会合并各来源的 hooks）。但**不要**再往工程里装一份本方案的 hook，那样每条 prompt 会被记两次。
+- 工程自己的 `.cursor/hooks.json` 不会和这套冲突（Cursor 会合并各来源的 hooks）。但**不要**再往工程里装一份本方案的 hook：那样每个事件都触发两次，两个进程互相把对方刚暂存的那一轮冲掉，先落库的很可能是只剩 prompt 的半轮。
 
 ## 日常怎么用
 
 **你不需要做任何事**，正常和 AI 对话即可：
 
-- 你发出的每条 prompt（≥25 字符、非 `/` 开头）会被自动记录，并先由总结模型提炼成干净的**英文**事实（后台进行，你感觉不到）。同一条 prompt 重发不会再记一遍，也不会再花一次模型调用。**这一条只在 Cursor 里成立**，ACP 宿主下没有自动捕获
+- **每一轮对话**（你的 prompt ≥25 字符、非 `/` 开头）会被自动记录：prompt 在你按下回车时暂存，AI 的回答在这一轮结束时并进来，两半一起交给总结模型提炼成干净的**英文**事实（后台进行，你感觉不到）。同一条 prompt 重发不会再记一遍，也不会再花一次模型调用。**这一条只在 Cursor 里成立**，ACP 宿主下没有自动捕获
 - 每个新会话开始时，本仓库的既有记忆会被自动注入（两条通道，宿主无关）
 - AI 学到值得长期记住的东西（偏好、约定、决策理由、坑）时会调 `memory_add`；同一句事实写第二次会被挡掉，换个说法写也会被挡掉并告诉它撞上了哪一条
-- AI 需要回忆过去时会调 `memory_search`（自动记录的 prompt 也在检索范围内）
+- AI 需要回忆过去时会调 `memory_search`（自动记录的对话也在检索范围内）
+
+### 两条写入通道的分工
+
+记忆有两个来源，故意不一样：**hook 保证"一定会记"，MCP 保证"记得好"**（为什么要两条，见 [DESIGN.md](DESIGN.md#两路写入hook-与-mcp)）。
+
+| | Hook：自动捕获一轮对话 | MCP：AI 主动写 |
+| --- | --- | --- |
+| 谁触发 | Cursor 的三个事件，与 AI 想不想记无关 | AI 判断"这条值得长期记住" |
+| 记的是什么 | 一轮对话的两半：你的 prompt + AI 的回答（回答按 `capture.maxResponseChars` 截尾部） | AI 交上来的一句干净事实 |
+| 过不过总结模型 | 过。每轮一次调用，约 15 秒，跑在后台，受 `llm.maxCallsPerDay` 限制 | 默认不过（`distil: true` 才过），所以工具调用不会卡 15 秒 |
+| 什么时候落库 | 这一轮结束之后（`stop`）；写入在独立进程里 | 工具调用当场返回结果 |
+| 落成什么 `kind` | 一律 `prompt`，**不进会话注入**，用 `prune --kind prompt` 清理 | 六个类别之一，由 AI 按判据填，进注入白名单 |
+| 判重 | 输入哈希按整轮算（原封重放免费；同一问题换个回答会重新交给模型判断），加上 mem0 抽取路径自己的"有没有新事实" | 输入哈希 + 语义判重（0.92 报错并点名撞上的那条） |
+| 失败会怎样 | 静默且可查：日志一行、`queue/*.failed`、`doctor` 报数；抽取失败回落原文存储 | 直接把错误返回给 AI，它自己决定改哪条或 `force` |
+| 哪些宿主有 | 只有 Cursor（ACP 宿主一个 hook 都不跑） | 任何跑 cursor-agent 的宿主，含 JetBrains 等 ACP 宿主 |
+
+一轮对话跨三个 hook，所以中途放弃也有兜底：`beforeSubmitPrompt` 暂存到 `~/.mem0-local/turns/`，`afterAgentResponse` 往里追加回答，`stop` 把它交给后台进程。这一轮没等到 `stop`（关窗口、切走），下一条 prompt、下一个会话、或任何宿主里下一次启动 MCP server 都会把它按"只有 prompt"写掉，超时时间是 `capture.turnTimeoutMinutes`；`doctor` 的 `turns awaiting end` 那行就是这些还没落库的轮次。只想要原来那种"发出即记录"的行为：`capture.includeResponse: false`。
+
+### 两类宿主分别能拿到什么
+
+上面那张表是"记忆从哪来"，这张表是"你在哪用"。**Cursor 跑 hooks，ACP 宿主（CLion / Rider 等 JetBrains IDE 里的 `cursor-agent acp`）一个 hook 都不跑**——这是实测出来的，不是配置问题（证据和后果见 [DESIGN.md](DESIGN.md#宿主差异cursor-与-acp-宿主)）：
+
+| 能力 | Cursor（桌面版 / CLI） | ACP 宿主（JetBrains 等） |
+| --- | --- | --- |
+| 会话开始注入本仓库记忆 | 两遍：`sessionStart` hook + MCP `instructions`（各不超过 `inject.maxChars`，确定主力宿主后可关掉一条） | 一遍：只有 MCP `instructions` |
+| 自动记录一轮对话 | **有**，三个 hook 合起来 | **没有**。这是唯一真正缺的能力，只能靠 AI 主动调 `memory_add` |
+| 6 个 `memory_*` 工具 | 有 | 有，完全一样 |
+| 认领没结束的轮次 | `sessionStart` + 下一条 prompt + MCP server 启动 | MCP server 启动（所以在这边泡一整天，Cursor 里丢下的那一轮也会被补写） |
+| 抽取模型、判重、重排、仓库隔离 | 同一套代码，宿主无关 | 同 |
+| 失效告警与每月清理 | Windows 计划任务，跑在 IDE 之外 | 同 |
+
+还有第三类宿主：**Cloud Agents**。用户级 `~/.cursor/hooks.json` 在那边不加载、`sessionStart` 也不支持，所以本方案在云端等于只剩 MCP 那一半；记忆库本来也在本机，不适用。
+
+**两边混用是安全的**：记忆库、仓库归属、判重都不分宿主，同一个仓库在 Cursor 里记下的东西在 CLion 里搜得到，反之亦然。差别只在"有没有人替你记"。
 
 写记忆时该用哪个 `kind`、注入为什么只有最近几条，见 [DESIGN.md](DESIGN.md#kind一份自己的类别词表)。想手动管理时用 CLI：
 
@@ -99,19 +137,18 @@ node scripts/test-hooks.mjs D:\UGit\HappyArenaTMR\HappyArena
 node src/cli.mjs doctor                              # 健康检查（存储 / 嵌入 / 总结模型 / Cursor 接线）
 node src/cli.mjs add "以后提交信息统一用中文" --kind preference
 node src/cli.mjs add "一大段啰嗦的话..." --infer      # 交给总结模型拆成若干条事实
-node src/cli.mjs add "全局习惯：优先用 pnpm" --kind preference --global
 node src/cli.mjs add "这条只在 5.4 期间成立" --expires 2026-12-31   # 到期自动淘汰
 node src/cli.mjs add "和已有记忆很像但确实是两回事" --force        # 硬写，跳过语义判重
-node src/cli.mjs search "提交信息怎么写" --top 5      # 加 --all 搜索所有仓库
+node src/cli.mjs search "提交信息怎么写" --top 5      # 不给 --top 就用 search.topK；加 --all 搜索所有仓库
 node src/cli.mjs search "10.BuildPC.bat" --explain   # 打印三路信号各贡献了多少
 node src/cli.mjs search "构建脚本" --no-rerank       # 只看三路融合排序，对比重排效果
 node src/cli.mjs list --limit 20                     # 加 --expired 连过期的一起列
 node src/cli.mjs stats
 node src/cli.mjs update 1223f031 "改正后的正文"       # 8 位短 id 就够；保留 id 与 createdAt
-node src/cli.mjs update 1223f031 --scope global      # 提升为全局记忆，id 和日期都不变
 node src/cli.mjs update 1223f031 --expires 2026-12-31
 node src/cli.mjs update 1223f031 --clear-expiry
-node src/cli.mjs delete <id>                         # 只能删本仓库（或全局）的记忆
+node src/cli.mjs history 1223f031                    # 这条记忆被改过几次、改之前写的是什么
+node src/cli.mjs delete <id>                         # 只能删本仓库的记忆
 node src/cli.mjs prune --kind prompt --days 30 --yes  # 清理 30 天前自动记录的 prompt
 node src/cli.mjs prune --expired                     # 看每月清理这次会删哪些（不加 --yes 只列出）
 node src/cli.mjs prune --expired --yes                # 立刻清理过期满 30 天的记忆
@@ -132,10 +169,11 @@ node src/cli.mjs watch                               # 立刻巡检一次（加 
 | `embedder.*` | 嵌入模型（本地 fastembed 或任何 OpenAI 兼容端点）与维度缓存 |
 | `llm.*` | 总结模型：开关、provider、模型 slug、CLI 路径、凭据、每日调用上限、追加给 mem0 的 `customInstructions` |
 | `reranker.*` | 第四路重排：开关、provider、模型、候选集宽度 |
+| `search.topK` | 一次搜索最多返回几条，默认 6（mem0 自己的默认是 20，差异的理由见 [DESIGN.md](DESIGN.md#和-mem0-默认值不一样的三处)）。是上限而非配额，命中少就返回得少；`memory_search` 的 `topK` 参数和 CLI 的 `--top` 可以按次覆盖 |
 | `search.threshold` | mem0 的相关性下限（`null` = 用它自己的 0.1）。**不建议调高**，融合分不可跨查询比较；想试的话 CLI 有 `search --threshold` 可以临时覆盖 |
 | `dedupe.similarity` | 判为"说的是同一件事"的余弦阈值，默认 0.92 |
 | `prune.*` | 每月清理：`expiredGraceDays`（过期后再留多久才真删，默认 30）、`dayOfMonth`。前者在清理时才读，改了不用重新注册任务 |
-| `capture.*` | 自动记录的开关与过滤：长度上下限、跳过前缀、`kind`、是否提炼 |
+| `capture.*` | 自动记录的开关与过滤：长度上下限、跳过前缀、`kind`、是否提炼；以及按轮捕获的三个字段 `includeResponse` / `maxResponseChars` / `turnTimeoutMinutes` |
 | `inject.*` | 会话注入：总开关、两条通道各自的开关、`recent` 条数、`maxChars` 字符上限、`kinds` 白名单、`includeProtocol` |
 | `watchdog.*` | 失效告警：开关、巡检间隔、重复弹窗间隔、探活超时、是否弹窗 |
 | `telemetry` | 默认 `false`，已关闭 mem0 的匿名遥测 |
@@ -153,27 +191,29 @@ node src/cli.mjs watch                               # 立刻巡检一次（加 
 }
 ```
 
-> **换嵌入模型 = 换向量空间。** 维度缓存会自动作废，但旧的 `vectors.db`/`vectors_entities.db` 必须归档或删除——不同维度的向量没法一起检索。老记忆要保留就先 `node src/cli.mjs list --all` 导出，重建后再写回。历史库（`history/`）不受影响。
+> **换嵌入模型 = 换向量空间。** 维度缓存会自动作废，但旧的 `vectors.db`/`vectors_entities.db` 必须归档或删除——不同维度的向量没法一起检索。老记忆要保留就先 `node src/cli.mjs list --all` 导出，重建后再写回。历史库（`history.db`）不受影响。
 
 ## 维护
 
 - **备份**：整个 `~/.mem0-local` 目录复制走即可（`models/` 可以不备份，会自动重新下载）
 - **日志**：`~/.mem0-local/logs/mem0-local.log`，包含每次注入/记录/模型调用（含 token 用量）/失败原因；Cursor 侧的 hook 报错看 Customize → Hooks 的输出面板
 - **失败的记录**：后台写入失败会留下 `~/.mem0-local/queue/*.json.failed`，`doctor` 会报数量
+- **没落库的轮次**：`~/.mem0-local/turns/` 里每个文件是一轮还没结束的对话，正常只有零到一个。堆了一批说明 `stop` hook 没在跑（`doctor` 的 `turns awaiting end` 会报出其中过了超时的），每个文件都是一条还没记下的记忆。过了 `capture.turnTimeoutMinutes` 的会在下一个会话被补写，认领它的有三处：下一条 prompt、`sessionStart`、以及任何宿主里启动 MCP server（所以在 JetBrains 里干活也算）
 - **模型用量**：`llm-usage.json` 是当天计数；日志里 `[llm]` 行有每次调用的 `duration_ms` 和 token 明细
 - **失效告警**：`watchdog.json` 是上次巡检结论，`heartbeat.json` 是上次真实会话的环境指纹。计划任务叫 `mem0-local watchdog`（`schtasks /Query /TN "mem0-local watchdog"` 查，`install-watchdog.mjs --uninstall` 摘）。它为什么要主动起一次服务、以及它到底在防什么，见 [DESIGN.md 的「失效告警」](DESIGN.md#失效告警)
 - **过期清理**：`last-sweep.json` 是上次清理的时间与删除条数，`doctor` 里对应 `expired memories` 和 `monthly sweep` 两行。计划任务叫 `mem0-local sweep`，每月 1 号 03:30 跑 `prune --expired --yes`（`install-sweeper.mjs --uninstall` 摘掉，摘掉只是不再清理，不删任何东西）。为什么要清、为什么留 30 天反悔窗口，见 [DESIGN.md 的「记忆的更新与淘汰」](DESIGN.md#记忆的更新与淘汰)
-- **历史库文件**：`history/<仓库 id>-<哈希>.db`，只增不减（删记忆不会删历史文件）。要清理直接删文件，下次用到会重建；`vectors.db` 才是记忆本体
+- **历史库文件**：`history.db`，只增不减（删记忆不会删历史）。`cli history <id>` 是它唯一的读法——`update` 改掉的旧正文只存在这里。要清理直接删文件，下次用到会重建；`vectors.db` 才是记忆本体。旧版本留下的 `history/` 目录（每个仓库一个文件）已经没人读了，可以整个删掉；代价是换 `agent_id` 之前写的那批记忆，`history` 命令查不到它们的变更行（会明确告诉你行在哪个目录里）
+- **迁移备份**：`migrate-to-agent-scope.mjs` / `rekey-project.mjs` 动手前会把 `vectors.db` 和 `vectors_entities.db` 复制成 `*.bak-<时间戳>`。确认结果没问题后自行删除，它们就是唯一的撤回手段
 
 自检脚本（前八个不调用模型，快且不花钱）：
 
 ```powershell
 node scripts/smoke-test.mjs       # 配置→嵌入→写入→检索→统计 全链路
-node scripts/test-mcp.mjs         # 真实 MCP 握手驱动全部工具；判重、短 id 改正、改 scope、过期与恢复
-node scripts/test-hooks.mjs       # 真实 hook 载荷驱动两个 hook（含 BOM 载荷、防递归）
+node scripts/test-mcp.mjs         # 真实 MCP 握手驱动全部工具；判重、短 id 改正、仓库归属、过期与恢复、认领未结束的轮次
+node scripts/test-hooks.mjs       # 真实 hook 载荷驱动四个 hook：按轮配对、未结束的轮次兜底、BOM 载荷、防递归
 node scripts/test-hooks.mjs D:\path\to\other\repo   # 指定仓库，验证某个工程的接线
 node scripts/test-retrieval.mjs   # 三路信号、重排、判重两道、到期日、实体链接、跨仓库读写边界
-node scripts/test-cli.mjs         # 真起 CLI 进程：参数解析、--explain、短 id 改正与到期日
+node scripts/test-cli.mjs         # 真起 CLI 进程：参数解析、--explain、短 id 改正、变更历史、到期日与清理
 node scripts/test-injection.mjs   # 注入实际发出多少条：预算、两个上限、老 config.json 迁移
 node scripts/test-health.mjs      # 失效告警：环境指纹、心跳、抑制窗口、真实探活（--notify 真弹一条）
 
@@ -182,6 +222,7 @@ $env:MEM0_LOCAL_NO_LLM=1; node scripts/test-llm.mjs   # 只跑免费那一半
 node src/cli.mjs doctor           # 会真调一次模型（live probe）
 node scripts/probe-prompt-size.mjs   # 打印 mem0 实际发给模型的 prompt 有多大、结构如何
 node scripts/bench-embedding.mjs     # 嵌入模型/语言方案的召回对比（不花钱）
+node scripts/bench-candidates.mjs    # 重排候选集要多宽才够（记忆库明显变大后重跑一次）
 ```
 
 ## 升级指南
@@ -205,7 +246,17 @@ node scripts/rekey-project.mjs --from <旧标识>                  # 先看会�
 node scripts/rekey-project.mjs --from <旧标识> --yes            # 确认后执行
 ```
 
-不带参数就是清单模式——`list` 和 `stats` 显示的都是仓库**名**（目录名，每个 clone 都一样），只有这里能看到真正的标识。迁移只改 `metadata.project`，id、日期、kind、过期时间都不动，所以把 `--from` 和 `--to` 对调就能撤回；`--to` 不给时取当前目录所属仓库，因此要在仓库根目录跑（在 `local-memory/` 里跑会被拦下来）。
+不带参数就是清单模式——`list` 和 `stats` 显示的都是仓库**名**（目录名，每个 clone 都一样），只有这里能看到真正的标识。它只改归属（`agent_id`，以及实体索引里跟着走的那些行），id、日期、kind、正文、过期时间都不动，所以把 `--from` 和 `--to` 对调就能撤回；`--to` 不给时取当前目录所属仓库，因此要在仓库根目录跑（在 `local-memory/` 里跑会被拦下来）。
+
+**从 `metadata.project` 时代升上来**（仓库归属改成 mem0 的 `agent_id` 之前写的记忆）：那些记忆在任何按仓库的读取里都是隐身的，先跑一次一次性迁移，同样默认只报告：
+
+```powershell
+node scripts/migrate-to-agent-scope.mjs         # 报告：多少条记忆、多少行实体会动
+node scripts/migrate-to-agent-scope.mjs --yes   # 执行（自动备份两个 .db）
+node src/cli.mjs list --limit 5                 # 验证：能列出来就说明归属对了
+```
+
+幂等，跑两次无害。带 `--global` 写过的记忆没有去处（`agent_id` 一次只能是一个值，"全局"这个概念已经没有了），脚本会报出条数并跳过；想留就用 `--global-to <仓库标识>` 把它们塞进某个仓库。为什么要换、代价是什么，见 [DESIGN.md](DESIGN.md#仓库标识就是-mem0-的-agent_id)。
 
 **升级 mem0 记忆引擎本身**（与本仓库无关，走 npm）：
 
@@ -234,9 +285,11 @@ Remove-Item -Recurse $env:USERPROFILE\.mem0-local   # 如果连数据一起删
 
 ## 已知限制
 
+- **没有跨仓库的「全局记忆」。** 归属用的是 mem0 的 `agent_id`，一次查询只接受一个值，所以"本仓库 + 全局"一次读不出来；一条记忆归哪个仓库也是写入时定的，改归属得跑 `rekey-project.mjs`。理由和代价见 [DESIGN.md](DESIGN.md#仓库标识就是-mem0-的-agent_id)。真需要一条到处可见的偏好，就在用得到的仓库里各写一条。
+- **自动记录的记忆要等这一轮结束才出现。** 一轮对话是记忆的单位，而 AI 的回答只有到 `stop` 才完整；这一轮被中断（关窗口、切走）就只记下 prompt 那一半，且要等下一条 prompt 或下一个会话才补写。想回到"发出即记录"就把 `capture.includeResponse` 关掉。
+- **AI 的回答只留尾部 `capture.maxResponseChars` 个字符**（默认 2000）。一轮的结论通常在最后，但一个把关键事实说在开头、之后又跑了几十次工具调用的回答，会只剩下后面那些无关的部分。
 - Cursor 的 `beforeSubmitPrompt` hook 官方**不支持注入上下文**，所以"每轮对话按当前问题自动检索"做不到确定性实现。检索发生在两处：会话开始时注入 + AI 需要时主动搜索。注入的协议文本会明确提醒 AI 去搜。
-- 用户级 `~/.cursor/hooks.json` 在 **Cloud Agents 里不加载**，`sessionStart` 在云端也不支持。本方案面向本机使用。
-- **ACP 宿主（JetBrains IDE 等）不执行 Cursor 的任何 hook。** 会话注入已由 MCP `instructions` 覆盖，但自动捕获 prompt 在那边失效，只能靠 AI 主动调 `memory_add`。
+- **ACP 宿主（JetBrains IDE 等）不执行 Cursor 的任何 hook**，Cloud Agents 也不加载用户级 `~/.cursor/hooks.json`。两边的会话注入都由 MCP `instructions` 覆盖，缺的是自动记录一轮对话，只能靠 AI 主动调 `memory_add`（逐项对照见[上面那张表](#两类宿主分别能拿到什么)）。
 - **注入通道被上游砍掉是唯一没被监控的失效**：cursor-agent 转发 MCP `instructions` 是实测行为、不是有契约的 API，真没了的话工具还在、巡检全绿，只有注入静默消失。
 - 首次运行下载嵌入模型（约 50MB），首次搜索再下载重排模型（约 87MB）。之后嵌入、检索、重排全部离线；开着总结模型时抽取那一步会出网到 Cursor。
 - **开着模型时，一条 prompt 可能一条记忆都不存**。mem0 会把已有记忆一起交给模型判断，认定"没有新事实"就返回空——这是去重生效，不是丢数据，日志里能看到 `stored=0`。模型跑偏（回复里没有 JSON）会被判为失败并回落原文存储，所以这两种情况不会混在一起。

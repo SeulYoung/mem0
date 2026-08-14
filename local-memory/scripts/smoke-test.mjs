@@ -81,7 +81,6 @@ written.push(
     project,
     kind: "preference",
     source: "smoke-test",
-    global: true,
   })),
 );
 show(written);
