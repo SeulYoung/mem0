@@ -72,10 +72,20 @@ export const DEFAULT_CONFIG = {
     /** Each call bills tokens to your Cursor account; this caps a runaway loop. */
     maxCallsPerDay: 200,
     /**
-     * Appended to mem0's extraction prompt. English is deliberate: it is what the
-     * embedding model is strongest at (92% vs 75% top-1, see `embedder.model`),
-     * and it costs nothing extra because this call happens either way. Identifiers
-     * must survive verbatim — they are what the BM25 and entity signals match on.
+     * Appended to mem0's extraction prompt, so it says only what mem0 does not.
+     * English is deliberate: it is what the embedding model is strongest at (92%
+     * vs 75% top-1, see `embedder.model`), and the call happens either way.
+     *
+     * mem0 asks for the opposite — facts in the language of the input, and its
+     * Python build calls translating into English CRITICAL to avoid. Asking anyway
+     * is safe only because mem0's TS port passes no language block and its
+     * extraction prompt has no language rule, so this is the only one the model
+     * sees, in the slot mem0 ranks highest (`## Custom Instructions`).
+     * `test-prompts.mjs` fails if a language rule appears upstream.
+     *
+     * The identifier clause knowingly repeats mem0's "Preserve Specific Details":
+     * that section assumes the memory keeps the input's language, so nothing in it
+     * exempts identifiers from a translation mem0 never expected to be asked for.
      */
     customInstructions:
       "Write every memory in English, translating from the source language when needed. Open each memory with the topic it is about, so a question about that topic matches it. Keep identifiers, file names, paths, command names and quoted strings exactly as they appear in the source — never translate or reformat them.",
@@ -174,9 +184,9 @@ export const DEFAULT_CONFIG = {
      */
     infer: true,
     /**
-     * Every captured turn goes through the model, however short. Verbatim
-     * storage would leave the original language in the store, and the embedding
-     * model is English-only — an unprocessed Chinese prompt is close to
+     * Low enough that effectively every captured turn goes through the model.
+     * Verbatim storage would leave the original language in the store, and the
+     * embedding model is English-only — an unprocessed Chinese prompt is close to
      * unretrievable. Raise this to trade recall for fewer calls.
      *
      * Counted over the whole turn (the prompt plus the reply that is kept), not

@@ -114,6 +114,17 @@ async function checkExtractionScope() {
     "scoping must not filter out the memories that make dedup work",
   );
 
+  // mem0 reads `agent_id` without `user_id` as "this store belongs to an agent"
+  // and appends AGENT_CONTEXT_SUFFIX, which brings every extracted fact back as
+  // agent knowledge ("Agent was informed that ..."). `scopeFilters` keeping
+  // `user_id` is all that holds it off, and losing it would change the voice of
+  // the store one memory at a time with nothing failing.
+  check(
+    "extraction stays in the third person rather than the agent's own voice",
+    !forA.includes("## Entity Context") && !forA.includes("Agent was informed"),
+    "mem0 appends AGENT_CONTEXT_SUFFIX as soon as filters carry agent_id without user_id",
+  );
+
   // Project A's call left its input in project A's message history; project B's
   // prompt must show neither the memory nor that message.
   const forB = await askedFor(projectB);

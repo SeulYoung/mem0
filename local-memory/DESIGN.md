@@ -2,7 +2,7 @@
 
 **这份文档只回答"为什么是这么设计的"**，安装、配置、日常命令都在 [README.md](README.md)。
 
-下面每一节都是当时量过、有证据的结论，写在这里是为了别再翻案；而每个实现细节的"这行为什么这么写"只在代码注释里写一遍——`src/config.mjs` 是配置项的唯一权威说明，`src/memory.mjs` 是判重与写入边界，`src/llm.mjs` 是模型桥，`src/injection.mjs` 是注入文本，`src/watchdog.mjs` 是巡检。
+下面每一节都是当时量过、有证据的结论，写在这里是为了别再翻案；而每个实现细节的"这行为什么这么写"只在代码注释里写一遍——`src/config.mjs` 是配置项的唯一权威说明，`src/memory.mjs` 是判重与写入边界，`src/llm.mjs` 是模型桥，`src/injection.mjs` 是注入文本，`src/wording.mjs` 与 `src/tools.mjs` 是 AI 可见的提示词，`src/watchdog.mjs` 是巡检。
 
 ## 为什么是这套组合
 
@@ -336,11 +336,34 @@ watchdog            all 3 runtime(s) ok 0m ago; scheduled task registered
 
 ### 提示词：只补 mem0 没说的
 
-本层一共 4 处提示词文本，读者不是同一个：`llm.customInstructions`（`src/config.mjs`，抽取模型读）、`MEMORY_PROTOCOL`（`src/injection.mjs`，和你对话的 AI 读）、6 个工具及参数的 `description`（`src/mcp-server.mjs`，同上）、`# Response rules`（`src/llm.mjs` 的 `buildPrompt`，抽取模型读）。
+本层一共 4 处提示词文本，读者不是同一个：`llm.customInstructions`（`src/config.mjs`，抽取模型读）、`MEMORY_PROTOCOL`（`src/injection.mjs`，和你对话的 AI 读）、6 个工具及参数的 `description`（`src/tools.mjs`，同上）、`# Response rules`（`src/llm.mjs` 的 `buildPrompt`，抽取模型读）。
 
-**给抽取模型的那两处，只写 mem0 自己没写的。** mem0 的抽取 prompt 已经要求"self-contained factual statement（15–80 词）"、已经在 `## Existing Memories` 里管好了去重与关联、也已经要求只输出 JSON，所以 `customInstructions` 一个字都不重复，只补三件上游确实没提的：写成英文、话题前置、标识符原样保留。唯一故意重复的是 `# Response rules` 那一行——mem0 靠 `response_format: json_object` 保证纯 JSON，而 CLI 不认这个参数。
+**共用的句子只写一遍，放 `src/wording.mjs`。** 给 AI 的那两处要重述 mem0 的同一份约定，重述两遍就会各自漂移——实际发生过：两处只引了 `15-80 words` 而丢了优先级规则，`memory_update` 还比 mem0 少允许两句。所以长度规则、拆分出路、英文与标识符这四条句子是常量，由协议文本和工具 schema 组合，`memory_update` 则只**指向** `memory_add`（指向是唯一不可能漂移的形式）。给抽取模型的那两处**刻意不引用**这些常量：它们是追加在 mem0 提示词后面的，mem0 已经说过的话在那里只该出现一次——在 mem0 自己那份里。
 
-**给 AI 的那两处相反，必须把 mem0 的质量约定重讲一遍。** 默认写入路径是原文直存（`distil: false`），**根本不经过 mem0 的抽取 prompt**，AI 写下的那句话就是最终入库的记忆。所以"one self-contained statement, 15–80 words"这条 mem0 自己的字段约定得由工具描述和协议文本来承担。store 挂掉时不发协议，换成一句"修好之前不要调这些工具"。
+**工具 schema 从 `mcp-server.mjs` 拆到了 `src/tools.mjs`。** 它们是提示词而不是代码：ACP 通道里 AI 看到的一半就是这些 description，而 `mcp-server.mjs` 顶层有 `await server.connect()`，导入即起服务，测试没法读。拆开之后服务器只剩管线，文本可以无副作用导入。
+
+### 提示词漂移只能被检测，不能被消除
+
+**mem0 不导出它的提示词。** `mem0ai/oss` 的公开导出里没有任何 prompt 常量（`ADDITIVE_EXTRACTION_PROMPT` 只在包内部用），所以"运行时直接引用上游原文"这条路是关着的。就算开着也不该走：mem0 那段文字的读者是**抽取器**，示例是 `Bad: "User has a dog"` 这种以 User 为主语的对话挖掘场景，直接贴进工具描述会把不相干的语境一起带进来；而整段 prompt 约 34000 字符，注入进每个会话的 instructions 里也是不可接受的开销。
+
+能做的是**检测**：提示词文本确实随包发布（`dist/oss/index.mjs`，590KB），`scripts/test-prompts.mjs` 用 `import.meta.resolve` 找到这个文件读原文，断言两类事情——
+
+| 断言 | 失效时会怎样 |
+| --- | --- |
+| 本层重述的 8 条上游说法逐字还在（`15-80 words`、`up to 100 for detail-rich content`、`completeness beats brevity`、`up to 3 for content with multiple proper nouns`、`split into multiple focused memories`、`### Self-Contained`、`Your sole operation is ADD`、`## Custom Instructions`） | mem0 改了约定而本层还在照旧宣讲，AI 按一份过期契约写记忆 |
+| mem0 仍然**不**规定语言（`SAME LANGUAGE` / `detect the language` / `Language Requirement` / `in the same language` 都不出现） | 英文策略从"唯一的语言指令"变成"和系统提示对着干"，需要重新评估而不是继续加大声量 |
+| 四处 AI 可见文本确实由 `wording.mjs` 的常量组合而成，且 `customInstructions` 没把长度规则抄回给 mem0 | 本层内部又漂移了 |
+
+读一个依赖的构建产物是刻意的，且只出现在这一个文件里：如果哪天读不到或提示词换了位置，这个测试会大声失败——那正是想要的结果。运行时没有任何地方这么做。免费、确定、毫秒级：`npm run test:prompts`。
+
+**给抽取模型的那两处，只写 mem0 自己没写的。** mem0 的抽取 prompt 已经要求"self-contained factual statement（15–80 词）"、已经在 `## Existing Memories` 里管好了去重与关联、也已经要求只输出 JSON，所以 `customInstructions` 只补两件上游确实没提的：写成英文、话题前置。另外两处重复是必要的，不是遗漏：
+
+- **标识符原样保留**——mem0 的 `### Preserve Specific Details` 讲的就是这件事，但那一段的前提是记忆保持输入语言，所以它没有、也不需要把标识符从"翻译"里豁免出去；一旦强制翻译，这个豁免就得自己写。
+- **`# Response rules` 那一行**——mem0 靠 `response_format: json_object` 保证纯 JSON，而 Cursor CLI 不认这个参数。
+
+**写英文是刻意反着来的，而且它没被上游压住只是因为一处移植缺口。** mem0 的 Python 提示词一律要求"record the facts in the same language"，`use_input_language` 段更把翻译成英文标为 `CRITICAL` 要避免。本层反过来（理由是 92% 对 75% 的命中率，见 `embedder.model`），能成立是因为 **mem0 的 TS 移植没有 `useInputLanguage` 这个入参**（`generateAdditiveExtractionPrompt` 只收 5 个字段），抽取提示词本体也不含任何语言规则——于是模型看到的唯一语言指令就是本层的，且落在 mem0 自己标为最高优先级的 `## Custom Instructions` 槽里。抽取路径若改走 Python SDK，或上游把这一段补回 TS，两者就会正面冲突。
+
+**给 AI 的那两处相反，必须把 mem0 的质量约定重讲一遍，而且要讲完整。** 默认写入路径是原文直存（`distil: false`），**根本不经过 mem0 的抽取 prompt**，AI 写下的那句话就是最终入库的记忆。所以长度约定得由工具描述和协议文本来承担——**连同它的优先级**：mem0 的原文是"15–80 词，detail-rich 可到 100"、"1–2 句，标识符/数量多时可到 3 句"、"completeness beats brevity，绝不为凑字数丢掉专名、日期或具体数字"、以及"一个话题装不下就拆成多条记忆"。早先这里只引了括号里的词数，把目标写成了硬上限，而本 store 里质量最高的几条（如 63 词 3 句、带 5 个数字的实测记录）本来就在被丢掉的那部分里。拆分这条出路还必须落成"再调一次 `memory_add`"，因为一次调用只存一条记忆，别处没有任何地方说过这件事。store 挂掉时不发协议，换成一句"修好之前不要调这些工具"。
 
 ### 抽取上下文的作用域
 
@@ -351,7 +374,11 @@ mem0 判断"哪些是新事实"的依据不只是你这次的输入，还有它�
 | `## Existing Memories` | 只按 `user_id` | 另一个仓库有条等价记忆，模型就判"已经记过了"，本仓库这条事实**永远不会写入** | 写入时也把仓库过滤传给 mem0 的 `filters`，和检索用的是同一套 |
 | `## Last k Messages` | `sessionScope`，由 `user_id`/`agent_id`/`run_id` 拼成 | 别的仓库的 prompt 会作为"最近对话"进入本仓库的抽取上下文 | 仓库标识就是 `agent_id`，于是它自动进了这个 key——同一个历史库文件里，两个仓库的消息互相看不见 |
 
-两条都有确定性回归测试：`scripts/test-llm.mjs` 用桩模型录下 mem0 真正构造的 prompt，断言另一个仓库的记忆和消息都不在里面。**两个仓库共用同一个 `Memory` 实例**跑这两个断言，这样测的就是 `agent_id` 本身在隔离，而不是"两个实例各写各的文件"。不花钱、不依赖模型发挥。
+mem0 的抽取 prompt 一共声明了 5 份上下文，剩下两份在 TS 移植里**恒为空**：`## Summary` 写死 `""`，`## Recently Extracted Memories` 写死 `[]`（`prompts/index.ts:837,844`，`generateAdditiveExtractionPrompt` 根本不收这两个入参）。而提示词把后者称作 "your primary deduplication reference"。**于是 `distil` 路径的去重全压在 `## Existing Memories` 一路上**——以整个 turn 为查询、融合分前 10、作用域已由本层收窄。本层自己的近重复检查（0.92 余弦）在这条路上是故意不跑的（`addMemory` 里 `dedupe && !wantInfer`），因为比事实比措辞准。代价是：一个多话题的 turn 里，某条事实的邻居可能挤不进那 10 行，于是跨 session 写出第二份。症状可辨认——`memory_list` 里两条近乎同义、`source_hash` 不同的记录。没有绕法，mem0 的 TS `Memory` 不接受这两份上下文；补一道事后去重要先写入再删除，不值得。
+
+**`AGENT_CONTEXT_SUFFIX` 永远不触发，靠的是 `user_id` 无条件传。** mem0 的判定是 `agent_id` 有而 `user_id` 无（`memory/index.ts:897`），命中就把 `## Entity Context` 追加到系统提示，让每条事实改写成"Agent was informed that ..."。仓库标识走的正是 `agent_id`，所以"既然仓库已经能隔离，`user_id` 是不是多余的"这个看起来无害的简化，会静默改掉整个 store 的人称，还会在每条记忆前加一段恒定前缀、把本层要求的话题前置顶掉。`test-llm.mjs` 对此有一条断言。
+
+前两条都有确定性回归测试：`scripts/test-llm.mjs` 用桩模型录下 mem0 真正构造的 prompt，断言另一个仓库的记忆和消息都不在里面。**两个仓库共用同一个 `Memory` 实例**跑这两个断言，这样测的就是 `agent_id` 本身在隔离，而不是"两个实例各写各的文件"。不花钱、不依赖模型发挥。
 
 v3.1.6 的 `escapeScopeValue`（上游 #6892）把 `sessionScope` 里的 `%&=` 转义掉，避免不同的身份键拼出同一个 key；仓库标识走 `agent_id` 之后，本层正好落在它保护的范围内（`/` 不需要转义，空白由 `resolveProject` 提前折掉）。
 

@@ -163,18 +163,22 @@ function toRecord(item) {
 /**
  * Scope a query to one repository, as mem0's own `agent_id`.
  *
- * The repository used to be a metadata key of ours, which worked for the vector
- * filter and for nothing else. `agent_id` is the field mem0 itself means "which
- * workspace this belongs to" by, so naming it that way puts the repository
- * boundary inside every mechanism mem0 has: the vector filter, the entity index
- * it consults for the entity boost, and the session scope its message replay is
- * keyed on. The price is that a memory can no longer be shared between
- * repositories — an identity key is fixed at write time, and mem0 accepts one
- * value per query, not a list.
+ * `agent_id` is the field mem0 itself means "which workspace this belongs to"
+ * by, so naming the repository that way puts the boundary inside every mechanism
+ * mem0 has: the vector filter, the entity index behind the entity boost, and the
+ * session scope its message replay is keyed on. The price is that a memory
+ * cannot be shared between repositories — an identity key is fixed at write
+ * time, and mem0 takes one value per query, not a list.
  *
  * Handed to mem0 rather than applied afterwards so it takes effect inside the
  * store, before top-k truncation. Also used on writes, where mem0 searches
  * existing memories to decide what is new.
+ *
+ * `user_id` stays even where `agent_id` alone would scope the query: mem0 reads
+ * `agent_id` without `user_id` as "these memories belong to an agent" and appends
+ * AGENT_CONTEXT_SUFFIX to its extraction prompt, which reframes every fact as
+ * agent knowledge ("Agent was informed that ..."). `test-llm.mjs` asserts it
+ * stays out.
  */
 export function scopeFilters(config, project, scope) {
   const filters = { user_id: config.userId };
@@ -423,13 +427,10 @@ export async function searchMemories({
 
   const limit = topK ?? config.search?.topK ?? DEFAULT_CONFIG.search.topK;
 
-  // The reranker only re-orders what the first stage already found, so ask mem0
-  // for a wider set than the caller wants and let the cross-encoder choose from
-  // it. Asking for exactly topK would rerank the one list we were going to
-  // return anyway, which is where reranking has the least to offer. The factor
-  // is mem0's own — it over-fetches `max(topK * 4, 60)` into the pool it fuses
-  // and scores — so the window widens with topK instead of being a constant that
-  // a large enough topK silently overtakes, taking the reranking with it.
+  // Rerank a wider set than the caller asked for: reranking only re-orders what
+  // the first stage found, so handing it exactly topK reranks the list we were
+  // going to return anyway. The window, and the factor it grows by, are
+  // `reranker.candidates`.
   const wantRerank = rerank ?? Boolean(rerankerConfig(config));
   const reranking = wantRerank && (await rerankerReady());
   const candidates = reranking ? Math.max(limit * 4, config.reranker?.candidates ?? 25) : limit;

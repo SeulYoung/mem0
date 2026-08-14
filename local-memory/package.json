@@ -26,6 +26,7 @@
     "test:hooks": "node scripts/test-hooks.mjs",
     "test:llm": "node scripts/test-llm.mjs",
     "test:injection": "node scripts/test-injection.mjs",
+    "test:prompts": "node scripts/test-prompts.mjs",
     "test:retrieval": "node scripts/test-retrieval.mjs",
     "test:cli": "node scripts/test-cli.mjs",
     "probe:prompt": "node scripts/probe-prompt-size.mjs"

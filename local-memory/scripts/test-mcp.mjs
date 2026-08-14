@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * Connects to the local MCP server the same way Cursor does (stdio + real MCP
- * handshake) and exercises every tool. Run after changing mcp-server.mjs.
+ * handshake) and exercises every tool. Run after changing the server or its
+ * tools.
  *
  * Also covers the two things the server does for hosts that run no hooks at all:
  * carrying the memory injection in the handshake, and claiming turns that were

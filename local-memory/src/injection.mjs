@@ -10,6 +10,7 @@
  * session, which makes it an equivalent moment to inject.
  */
 import { listMemories } from "./memory.mjs";
+import { ENGLISH_ONLY, KEEP_IDENTIFIERS, MEMORY_LENGTH, SPLIT_NOT_COMPRESS } from "./wording.mjs";
 
 export const MEMORY_PROTOCOL = [
   "Memory protocol for this session:",
@@ -20,16 +21,14 @@ export const MEMORY_PROTOCOL = [
   // Phrased so it stays true when nothing was injected at all, which is what
   // the empty-repository and budget-starved cases both produce.
   "- Injection carries at most a handful of the newest memories, so anything older is reachable only by searching. Call `memory_search` before answering anything that may depend on earlier sessions, before following a project convention you have not checked, and whenever the user refers to past work.",
-  // Length and self-containment are mem0's own contract for a memory (its
-  // extraction prompt asks for a self-contained statement of 15-80 words), and
-  // the default write path here is verbatim, which never runs that prompt. So
-  // the requirement has to be restated where the agent can see it.
-  "- Call `memory_add` when you learn something durable: a user preference, a project convention, a decision and its reason, or a non-obvious pitfall. One self-contained statement each, 15-80 words, stating the fact itself rather than the conversation it came from.",
+  // mem0's own rules, restated because the default write path is verbatim and
+  // never runs the prompt that states them. See `wording.mjs`.
+  `- Call \`memory_add\` when you learn something durable: a user preference, a project convention, a decision and its reason, or a non-obvious pitfall. ${MEMORY_LENGTH} ${SPLIT_NOT_COMPRESS}`,
   "- Call `memory_update` when something above turns out to be wrong or out of date. Memories are only ever added, never overwritten, so a correction stored as a new memory leaves both versions to come back in later searches.",
   // Both retrieval signals mem0 fuses are English-bound, and the keyword one
   // fails outright rather than degrading: its lemmatiser matches /[a-z0-9]+/g,
   // so a CJK memory becomes a single token that no query can hit.
-  "- Write memories and search queries in English, opening with the topic, even when the conversation is in another language. Retrieval is English-only: the embedding model is English, and the keyword index cannot split CJK text into words at all. Keep identifiers, file names and command names exactly as they appear.",
+  `- Write memories and search queries in English, opening with the topic, even when the conversation is in another language. ${ENGLISH_ONLY} ${KEEP_IDENTIFIERS}`,
 ].join("\n");
 
 /**
