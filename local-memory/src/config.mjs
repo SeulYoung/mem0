@@ -76,19 +76,26 @@ export const DEFAULT_CONFIG = {
      * English is deliberate: it is what the embedding model is strongest at (92%
      * vs 75% top-1, see `embedder.model`), and the call happens either way.
      *
-     * mem0 asks for the opposite — facts in the language of the input, and its
-     * Python build calls translating into English CRITICAL to avoid. Asking anyway
-     * is safe only because mem0's TS port passes no language block and its
-     * extraction prompt has no language rule, so this is the only one the model
-     * sees, in the slot mem0 ranks highest (`## Custom Instructions`).
-     * `test-prompts.mjs` fails if a language rule appears upstream.
+     * mem0's v3 extraction prompt imposes no language rule at all, in either OSS
+     * build, so this is the only language instruction the model sees — and it
+     * lands in the slot mem0 ranks highest (`## Custom Instructions`). Upstream
+     * does own such a rule, but nothing reaches it: the Python prompt builder can
+     * append a `## Language Requirement` block calling translation into English
+     * CRITICAL to avoid, and `Memory.add` never passes the flag that emits it;
+     * the TS port has no such parameter at all. `test-prompts.mjs` fails if a
+     * language rule appears in the TS bundle this layer runs on.
      *
      * The identifier clause knowingly repeats mem0's "Preserve Specific Details":
      * that section assumes the memory keeps the input's language, so nothing in it
      * exempts identifiers from a translation mem0 never expected to be asked for.
+     * The CJK sentence closes the case that exemption is least obvious in — a
+     * table name or log string that *is* Chinese, where "write English" and "keep
+     * it verbatim" point opposite ways. Captured turns are where those arrive, so
+     * the extraction model needs the same arbitration `wording.mjs` gives the
+     * agent, and it needs the gloss too: a bare CJK token is unretrievable.
      */
     customInstructions:
-      "Write every memory in English, translating from the source language when needed. Open each memory with the topic it is about, so a question about that topic matches it. Keep identifiers, file names, paths, command names and quoted strings exactly as they appear in the source — never translate or reformat them.",
+      "Write every memory in English, translating from the source language when needed. Open each memory with the topic it is about, so a question about that topic matches it. Keep identifiers, file names, paths, command names and quoted strings exactly as they appear in the source — never translate or reformat them. This holds for identifiers that are themselves Chinese: keep the original characters, and describe in English what they are, in the same sentence.",
     /** Only used when provider is "openai". */
     baseURL: null,
   },
@@ -246,7 +253,7 @@ export const DEFAULT_CONFIG = {
      * Only curated memories are injected. Raw captured prompts stay searchable
      * through memory_search but would otherwise crowd out the useful records.
      */
-    kinds: ["preference", "convention", "decision", "gotcha", "fact", "note"],
+    kinds: ["preference", "convention", "decision", "gotcha", "fact", "context", "note"],
     /** Also tell the agent how to use the memory tools every session. */
     includeProtocol: true,
   },
@@ -319,7 +326,20 @@ const SUPERSEDED_DEFAULTS = [
    * eight never happened.
    */
   { path: ["inject", "maxChars"], was: 2500 },
+  /**
+   * The `context` kind did not exist when these installs snapshotted the
+   * whitelist. An array is replaced wholesale by `deepMerge` rather than merged,
+   * so without this every machine that has ever run this layer would store
+   * `context` memories and silently never inject one.
+   */
+  { path: ["inject", "kinds"], was: ["preference", "convention", "decision", "gotcha", "fact", "note"] },
 ];
+
+/** Element-wise for arrays, because a whitelist is superseded as a whole. */
+function isSuperseded(value, was) {
+  if (!Array.isArray(was)) return value === was;
+  return Array.isArray(value) && value.length === was.length && was.every((item, index) => value[index] === item);
+}
 
 /** Returns true when something was dropped, so the caller can rewrite the file. */
 function dropSupersededDefaults(onDisk) {
@@ -327,7 +347,7 @@ function dropSupersededDefaults(onDisk) {
   for (const { path, was } of SUPERSEDED_DEFAULTS) {
     const parent = path.slice(0, -1).reduce((node, key) => (isPlainObject(node) ? node[key] : undefined), onDisk);
     const leaf = path[path.length - 1];
-    if (isPlainObject(parent) && parent[leaf] === was) {
+    if (isPlainObject(parent) && isSuperseded(parent[leaf], was)) {
       delete parent[leaf];
       dropped = true;
     }

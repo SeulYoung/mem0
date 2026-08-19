@@ -11,8 +11,8 @@
  *   - `recent` still caps the list once the budget stops binding
  *   - nothing fitting yields no lines, which is what lets the caller say so
  *     instead of reporting the repository as empty
- *   - a config.json written by an older version picks the corrected budget up,
- *     while a figure chosen by hand survives
+ *   - a config.json written by an older version picks the corrected budget and
+ *     the current kind whitelist up, while a choice made by hand survives
  *
  * Needs no store and no embedding model, so it runs in milliseconds.
  */
@@ -145,6 +145,25 @@ check(
   "a budget chosen by hand is left alone",
   chosen.effective.maxChars === 1200 && chosen.persisted.maxChars === 1200,
   `effective ${chosen.effective.maxChars}, on disk ${chosen.persisted.maxChars}`,
+);
+
+// --- the same, for the whitelist a new kind has to get into -------------------
+// A list is replaced wholesale by the merge rather than merged, so a kind added
+// after an install wrote its snapshot would be storable and never injected —
+// the quietest failure this layer has, because the memory is right there in
+// `list` and simply never reaches a session.
+const OLD_KINDS = ["preference", "convention", "decision", "gotcha", "fact", "note"];
+const staleKinds = inTempHome({ recent: 8, kinds: OLD_KINDS });
+check(
+  "a whitelist written before a kind existed picks that kind up",
+  staleKinds.effective.kinds.includes("context") && staleKinds.persisted.kinds.includes("context"),
+  `effective [${staleKinds.effective.kinds.join(", ")}]`,
+);
+const chosenKinds = inTempHome({ recent: 8, kinds: ["convention", "gotcha"] });
+check(
+  "a whitelist chosen by hand is left alone",
+  chosenKinds.effective.kinds.join() === "convention,gotcha",
+  `effective [${chosenKinds.effective.kinds.join(", ")}]`,
 );
 
 out(failures === 0 ? "\nInjection selection verified." : `\n${failures} check(s) failed.`);

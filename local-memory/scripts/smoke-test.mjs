@@ -58,6 +58,9 @@ const refused = async (label, run) => {
 show([
   await refused("unknown kind", () => addMemory({ text: "guard probe", project, kind: "notekind" })),
   await refused("empty text", () => addMemory({ text: "   ", project })),
+  // `context` is the one kind whose premise is that it stops being true, so an
+  // expiry is what makes it storable at all rather than a nicety.
+  await refused("context without an expiry", () => addMemory({ text: "guard probe", project, kind: "context" })),
 ]);
 
 step("embedding dimension (first run downloads the model)");

@@ -36,11 +36,16 @@ const check = (label, ok, detail) => {
   if (!ok) failures += 1;
 };
 
-function cli(...args) {
+function run(...args) {
   const result = spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8" });
   if (result.status !== 0) throw new Error(`cli ${args.join(" ")} exited ${result.status}: ${result.stderr}`);
-  return result.stdout;
+  return result;
 }
+
+// Almost every case here reads the records the CLI printed, which is stdout;
+// the two streams are separated on purpose, so a diagnostic can never be
+// mistaken for a memory by whatever is reading the output.
+const cli = (...args) => run(...args).stdout;
 
 try {
   // A value flag after the text: "convention" must not become part of the body.
@@ -49,8 +54,21 @@ try {
   check("the value flag was applied", added.includes("[convention]"), added.split("\n")[0]);
 
   // A switch placed before the text: the query must survive it.
-  const searched = cli("search", "--all", MARKER, "--top", "3");
-  check("a switch before the query does not swallow the query", searched.includes(BODY), searched.split("\n")[0]);
+  const searched = run("search", "--all", MARKER, "--top", "3");
+  check(
+    "a switch before the query does not swallow the query",
+    searched.stdout.includes(BODY),
+    searched.stdout.split("\n")[0],
+  );
+
+  // The marker is pure CJK, so this search also covers the one query shape
+  // mem0's keyword index and entity extractors cannot see. Where it lands
+  // matters as much as that it appears: on stderr it stays out of the records,
+  // and `test-retrieval.mjs` is what pins down when it fires.
+  check(
+    "a query that reaches only the embedding model says so, on stderr",
+    searched.stderr.includes("no Latin letters or digits") && !searched.stdout.includes("no Latin letters"),
+  );
 
   const explained = cli("search", MARKER, "--top", "2", "--explain");
   check("--explain reports mem0's per-signal scores", /signals: semanticScore=/.test(explained));

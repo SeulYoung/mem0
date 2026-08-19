@@ -20,6 +20,8 @@
  *   - a repeated write is refused twice over: by the hash of its input and by
  *     what it means, the second one loudly enough to name the memory it hit
  *   - an expiry set at write time hides the memory the way mem0 hides one
+ *   - a query that can reach none of the ASCII-bound signals says so, and one
+ *     that can reach them stays quiet
  */
 import { loadConfig } from "../src/config.mjs";
 import { createEmbedder } from "../src/embedder.mjs";
@@ -28,6 +30,7 @@ import {
   deleteMemory,
   listMemories,
   memoryConfig,
+  queryReachWarning,
   routeConsoleToStderr,
   scopeFilters,
   searchMemories,
@@ -218,6 +221,28 @@ async function checkExpiryOnWrite() {
   );
 }
 
+/**
+ * The guard over the query shape two of the three signals cannot see. Pure, so
+ * it needs no fixtures: what it pins down is where the line falls, because the
+ * warning is worth nothing if it also fires on queries that do reach the
+ * keyword index — an agent that learns to ignore it has lost the one case it
+ * exists for.
+ */
+function checkQueryReach() {
+  const warned = (query) => queryReachWarning(query) !== null;
+  check("a CJK-only query is called out", warned("空投宝箱是怎么生成的"));
+  check("so is one that is only an identifier", warned("重回房间"));
+  check("punctuation does not rescue it", warned("空投宝箱？"));
+  // The fix the warning asks for has to switch it off, or it is telling the
+  // caller to do something that changes nothing.
+  check("one English word is enough to reach the keyword index", !warned("空投宝箱 chest"));
+  check("an ordinary English query is left alone", !warned("how is the airdrop chest spawned"));
+  // Digits are lemmatised alongside letters (/[a-z0-9]+/), so a version number
+  // or an error code is a real keyword even with no prose around it.
+  check("a bare number is a keyword, not a dead query", !warned("5.4"));
+  check("an empty query has nothing to warn about", !warned("   "));
+}
+
 try {
   await wipe();
 
@@ -364,6 +389,7 @@ try {
   await checkDeduplication();
   await wipe();
   await checkExpiryOnWrite();
+  checkQueryReach();
 
   out(failures === 0 ? "\nRetrieval features verified." : `\n${failures} check(s) failed.`);
 } finally {

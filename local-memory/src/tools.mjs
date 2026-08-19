@@ -17,9 +17,9 @@ const SCOPE_READ = {
 
 /**
  * The catalog, plus the two overlaps that get judged wrong (measurements filed as
- * `gotcha`, this layer's own choices filed as `fact`) and the two things that are
- * not memories at all: work in flight, which is wrong within the week, and work
- * not yet done, which nothing here removes unless it carries an expiry.
+ * `gotcha`, this layer's own choices filed as `fact`), the one thing that is not
+ * a memory at all (a progress report, which is wrong within the week), and where
+ * task background goes now that it has a kind of its own.
  */
 const KIND_DESCRIPTION = [
   'Which category the memory belongs to (default "note"):',
@@ -27,7 +27,7 @@ const KIND_DESCRIPTION = [
   "If it fits both fact and gotcha, ask whether something goes wrong when you do not know it, and whether it goes wrong quietly — a constraint that fails loudly on the first try is a fact, not a gotcha.",
   "If it fits both convention and decision, what you have to follow is a convention; what explains why things look the way they do is a decision.",
   'Never store a progress report: "X is now done" stops being true and reads as news forever. Write the durable fact the work left behind.',
-  "Storing something not yet built — a design you worked out, a step you agreed — needs an expiresAt, because nothing else in this store ever removes it.",
+  "The background of the work you are doing is context, not note — and it is refused without an expiresAt, because nothing else in this store ever removes it.",
 ].join("\n");
 
 const MEMORY_ID = {
@@ -84,7 +84,7 @@ export function memoryTools(config) {
           expiresAt: {
             type: "string",
             description:
-              'Date after which this memory is ignored, as "YYYY-MM-DD". Set it when the fact has a known shelf life — a measured duration, a dependency version, a workaround for a bug that will be fixed. Leave it out for anything that should be remembered indefinitely.',
+              'Date after which this memory is ignored, as "YYYY-MM-DD". Set it when the fact has a known shelf life — a measured duration, a dependency version, a workaround for a bug that will be fixed. Required for kind "context". Leave it out for anything that should be remembered indefinitely.',
           },
           force: {
             type: "boolean",
@@ -136,7 +136,7 @@ export function memoryTools(config) {
           expiresAt: {
             type: ["string", "null"],
             description:
-              'Date after which this memory is ignored, as "YYYY-MM-DD". Use it for facts with a known shelf life, such as a measured duration or a dependency version. Pass null to remove an expiry that was set earlier.',
+              'Date after which this memory is ignored, as "YYYY-MM-DD". Use it for facts with a known shelf life, such as a measured duration or a dependency version. Pass null to remove an expiry that was set earlier, which a "context" memory does not allow.',
           },
         },
         required: ["id"],

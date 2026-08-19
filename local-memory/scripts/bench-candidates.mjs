@@ -12,7 +12,13 @@
  * This measures the pool size at which the winner stops changing, against the
  * real store, and what each width costs in time. Read-only.
  *
+ * The conclusion expires on its own: a winner that sits at a fixed percentile of
+ * the store drops past a fixed pool as the store grows. So the verdict at the
+ * end is about the width the layer actually uses — how many queries it already
+ * gets wrong, and how many places of headroom are left before it does.
+ *
  * Usage: node scripts/bench-candidates.mjs [pool sizes...]
+ *        MEM0_LOCAL_BENCH_ROOT=D:\some\repo node scripts/bench-candidates.mjs
  */
 import { loadConfig } from "../src/config.mjs";
 import { listMemories, openMemory, routeConsoleToStderr, scopeFilters } from "../src/memory.mjs";
@@ -39,7 +45,17 @@ const QUERIES = [
   "which node runtime starts the MCP server",
 ];
 
-const POOLS = process.argv.slice(2).length > 0 ? process.argv.slice(2).map(Number) : [6, 25, 60, 0];
+/**
+ * What `searchMemories` actually asks mem0 for. Comparing anything else against
+ * the whole store answers a question nobody has: the only pool that decides
+ * whether `reranker.candidates` needs widening is the one the layer really uses.
+ */
+const CONFIGURED = Math.max((config.search?.topK ?? 6) * 4, config.reranker?.candidates ?? 25);
+
+const POOLS =
+  process.argv.slice(2).length > 0
+    ? process.argv.slice(2).map(Number)
+    : [...new Set([6, CONFIGURED, 60])].sort((a, b) => a - b).concat(0);
 
 const { memory } = await openMemory();
 const filters = scopeFilters(config, project, "project");
@@ -57,10 +73,16 @@ async function ranked(query, pool, rerank) {
 }
 
 out(`store: ${total} memories in ${project.id}`);
-out(`pools: ${POOLS.map(label).join(", ")}\n`);
+out(`pools: ${POOLS.map(label).join(", ")}   (searchMemories asks for ${CONFIGURED})\n`);
+
+// One untimed search first: the model loads lazily, so without this the very
+// first pool absorbs the load and the timing column comes out non-monotonic.
+await ranked(QUERIES[0], POOLS[0], true);
 
 const timings = new Map(POOLS.map((pool) => [pool, []]));
 let changedByWidening = 0;
+let missedByConfigured = 0;
+let worstFusedRank = 0;
 
 for (const query of QUERIES) {
   const fused = await ranked(query, 0, false);
@@ -77,6 +99,9 @@ for (const query of QUERIES) {
   const fusedRank = widest ? fused.ids.indexOf(widest) + 1 : 0;
   const narrowest = winners[0].id;
   if (narrowest !== widest) changedByWidening += 1;
+  const atConfigured = winners.find((w) => w.pool === CONFIGURED);
+  if (atConfigured && atConfigured.id !== widest) missedByConfigured += 1;
+  if (fusedRank > worstFusedRank) worstFusedRank = fusedRank;
 
   const text = new Map(
     (await listMemories({ project, limit: 100000, scope: "project" }))
@@ -92,8 +117,25 @@ for (const query of QUERIES) {
 }
 
 out(`queries whose top result changed between pool ${label(POOLS[0])} and pool ${label(POOLS.at(-1))}: ${changedByWidening} of ${QUERIES.length}`);
+out("");
+// The verdict. `missedByConfigured` going above 0 means the pool is already too
+// narrow; the headroom says how much room is left before it does, and shrinks
+// on its own as the store grows even when nothing else changes.
+out(`VERDICT  pool ${CONFIGURED} disagrees with the whole store on ${missedByConfigured} of ${QUERIES.length} queries`);
+out(
+  `         deepest winner sat at fused rank ${worstFusedRank} of ${total}` +
+    ` — ${CONFIGURED - worstFusedRank} place(s) of headroom under the configured pool`,
+);
+if (missedByConfigured > 0) {
+  out(`         → widen reranker.candidates past ${worstFusedRank}.`);
+} else if (CONFIGURED - worstFusedRank <= 5) {
+  out(`         → still correct, but the margin is thin. Re-run after the next batch of memories.`);
+}
+out("");
 for (const pool of POOLS) {
-  const list = timings.get(pool);
-  const mean = Math.round(list.reduce((sum, ms) => sum + ms, 0) / list.length);
-  out(`  pool ${label(pool).padEnd(9)} mean ${String(mean).padStart(5)}ms   max ${Math.max(...list)}ms`);
+  const list = [...timings.get(pool)].sort((a, b) => a - b);
+  // Median, not mean: one stray GC or disk hit is enough to make a mean claim
+  // that a wider pool is faster than a narrower one.
+  const median = list[Math.floor(list.length / 2)];
+  out(`  pool ${label(pool).padEnd(9)} median ${String(median).padStart(5)}ms   max ${Math.max(...list)}ms`);
 }

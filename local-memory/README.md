@@ -95,7 +95,7 @@ node scripts/test-hooks.mjs D:\UGit\HappyArenaTMR\HappyArena
 - **每一轮对话**（你的 prompt ≥25 字符、非 `/` 开头）会被自动记录：prompt 在你按下回车时暂存，AI 的回答在这一轮结束时并进来，两半一起交给总结模型提炼成干净的**英文**事实（后台进行，你感觉不到）。同一条 prompt 重发不会再记一遍，也不会再花一次模型调用。**这一条只在 Cursor 里成立**，ACP 宿主下没有自动捕获
 - 每个新会话开始时，本仓库的既有记忆会被自动注入（两条通道，宿主无关）
 - AI 学到值得长期记住的东西（偏好、约定、决策理由、坑）时会调 `memory_add`；同一句事实写第二次会被挡掉，换个说法写也会被挡掉并告诉它撞上了哪一条
-- AI 需要回忆过去时会调 `memory_search`（自动记录的对话也在检索范围内）
+- AI 需要回忆过去时会调 `memory_search`（自动记录的对话也在检索范围内）。**查询也得是英文**：不含任何 ASCII 字母或数字的查询只有语义一路能跑，检索出来的其实是"哪条记忆的中文最多"，所以这种查询会带回一条 `warning`，说明这次排序是任意的（理由见 [DESIGN.md](DESIGN.md#检索的三路信号)）
 
 ### 两条写入通道的分工
 
@@ -107,7 +107,7 @@ node scripts/test-hooks.mjs D:\UGit\HappyArenaTMR\HappyArena
 | 记的是什么 | 一轮对话的两半：你的 prompt + AI 的回答（回答按 `capture.maxResponseChars` 截尾部） | AI 交上来的一句干净事实 |
 | 过不过总结模型 | 过。每轮一次调用，约 15 秒，跑在后台，受 `llm.maxCallsPerDay` 限制 | 默认不过（`distil: true` 才过），所以工具调用不会卡 15 秒 |
 | 什么时候落库 | 这一轮结束之后（`stop`）；写入在独立进程里 | 工具调用当场返回结果 |
-| 落成什么 `kind` | 一律 `prompt`，**不进会话注入**，用 `prune --kind prompt` 清理 | 六个类别之一，由 AI 按判据填，进注入白名单 |
+| 落成什么 `kind` | 一律 `prompt`，**不进会话注入**，用 `prune --kind prompt` 清理 | 七个类别之一，由 AI 按判据填，进注入白名单 |
 | 判重 | 输入哈希按整轮算（原封重放免费；同一问题换个回答会重新交给模型判断），加上 mem0 抽取路径自己的"有没有新事实" | 输入哈希 + 语义判重（0.92 报错并点名撞上的那条） |
 | 失败会怎样 | 静默且可查：日志一行、`queue/*.failed`、`doctor` 报数；抽取失败回落原文存储 | 直接把错误返回给 AI，它自己决定改哪条或 `force` |
 | 哪些宿主有 | 只有 Cursor（ACP 宿主一个 hook 都不跑） | 任何跑 cursor-agent 的宿主，含 JetBrains 等 ACP 宿主 |
@@ -138,10 +138,12 @@ node src/cli.mjs doctor                              # 健康检查（存储 / �
 node src/cli.mjs add "以后提交信息统一用中文" --kind preference
 node src/cli.mjs add "一大段啰嗦的话..." --infer      # 交给总结模型拆成若干条事实
 node src/cli.mjs add "这条只在 5.4 期间成立" --expires 2026-12-31   # 到期自动淘汰
+node src/cli.mjs add "本次需求的背景与范围..." --kind context --expires 2026-09-30   # context 不给 --expires 会被拒
 node src/cli.mjs add "和已有记忆很像但确实是两回事" --force        # 硬写，跳过语义判重
-node src/cli.mjs search "提交信息怎么写" --top 5      # 不给 --top 就用 search.topK；加 --all 搜索所有仓库
+node src/cli.mjs search "how to write a commit message" --top 5   # 不给 --top 就用 search.topK；加 --all 搜索所有仓库
 node src/cli.mjs search "10.BuildPC.bat" --explain   # 打印三路信号各贡献了多少
-node src/cli.mjs search "构建脚本" --no-rerank       # 只看三路融合排序，对比重排效果
+node src/cli.mjs search "build script" --no-rerank   # 只看三路融合排序，对比重排效果
+node src/cli.mjs search "构建脚本"                   # 查询也要用英文：纯中文只有语义一路能跑，会在 stderr 上警告
 node src/cli.mjs list --limit 20                     # 加 --expired 连过期的一起列
 node src/cli.mjs stats
 node src/cli.mjs update 1223f031 "改正后的正文"       # 8 位短 id 就够；保留 id 与 createdAt
@@ -221,8 +223,11 @@ node scripts/test-llm.mjs         # 抽取路径：作用域用桩模型验（�
 $env:MEM0_LOCAL_NO_LLM=1; node scripts/test-llm.mjs   # 只跑免费那一半
 node src/cli.mjs doctor           # 会真调一次模型（live probe）
 node scripts/probe-prompt-size.mjs   # 打印 mem0 实际发给模型的 prompt 有多大、结构如何
-node scripts/bench-embedding.mjs     # 嵌入模型/语言方案的召回对比（不花钱）
-node scripts/bench-candidates.mjs    # 重排候选集要多宽才够（记忆库明显变大后重跑一次）
+node scripts/bench-embedding.mjs     # 嵌入模型/语言方案的召回对比（不花钱；不给参数会跑全部 10 种，含 2GB 的 e5）
+node scripts/bench-embedding.mjs en-bge-en   # 只跑当前在用的那种，几秒钟
+node scripts/bench-candidates.mjs    # 重排候选集要多宽才够；末尾直接给结论和余量，余量不足会出声
+node scripts/bench-retrieval.mjs     # 中文标识符 + 英文注解那条规则端到端还成不成立（会断言，退化非零退出）；附重排分数曲线
+$env:MEM0_LOCAL_BENCH_ROOT="D:\path\to\repo"; node scripts/bench-retrieval.mjs   # 分数曲线换一个仓库的库来看
 ```
 
 ## 升级指南

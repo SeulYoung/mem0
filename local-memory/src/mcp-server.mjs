@@ -19,6 +19,7 @@ import {
   addMemory,
   deleteMemory,
   listMemories,
+  queryReachWarning,
   routeConsoleToStderr,
   searchMemories,
   statsMemories,
@@ -64,7 +65,10 @@ async function runTool(name, args) {
         topK: args.topK ?? null,
         scope: args.scope ?? "project",
       });
-      return { project: project.id, count: results.length, results };
+      // Ahead of the results rather than beside them: an agent that reads the
+      // hits first has already started trusting an arbitrary ordering.
+      const warning = queryReachWarning(args.query);
+      return { project: project.id, ...(warning ? { warning } : {}), count: results.length, results };
     }
     case "memory_add": {
       const stored = await addMemory({

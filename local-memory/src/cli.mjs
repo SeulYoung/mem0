@@ -37,6 +37,7 @@ import {
   historyMemory,
   listMemories,
   openMemory,
+  queryReachWarning,
   routeConsoleToStderr,
   searchMemories,
   statsMemories,
@@ -110,8 +111,12 @@ function renderRecords(records) {
     const reranked = record.rerankScore === undefined ? "" : ` rerank=${record.rerankScore.toExponential(2)}`;
     const from = record.attributedTo ? ` from=${record.attributedTo}` : "";
     const expiry = record.expiresAt ? ` expires=${record.expiresAt}` : "";
+    // Present only on a memory that has been rewritten. Worth a column of its
+    // own because an edit keeps the original `createdAt`, so this is the only
+    // thing that says the text is newer than the memory looks.
+    const edited = record.updatedAt ? ` edited=${record.updatedAt.slice(0, 10)}` : "";
     out(
-      `${record.id.slice(0, 8)}  [${record.kind ?? "note"}] ${record.projectName ?? "-"}${score}${reranked}${from}${expiry}\n    ${record.text}`,
+      `${record.id.slice(0, 8)}  [${record.kind ?? "note"}] ${record.projectName ?? "-"}${score}${reranked}${from}${expiry}${edited}\n    ${record.text}`,
     );
     // mem0 fuses semantic + BM25 keyword + entity boost; --explain shows which fired.
     if (record.scoreDetails) {
@@ -369,6 +374,10 @@ switch (command) {
     }
     const threshold = flag("threshold", null);
     const top = flag("top", null);
+    // Before the list, not after it: a caveat printed under six results has
+    // already been overtaken by the reader.
+    const warning = queryReachWarning(query);
+    if (warning) console.warn(warning);
     renderRecords(
       await searchMemories({
         query,

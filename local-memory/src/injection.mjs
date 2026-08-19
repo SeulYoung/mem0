@@ -24,10 +24,17 @@ export const MEMORY_PROTOCOL = [
   // mem0's own rules, restated because the default write path is verbatim and
   // never runs the prompt that states them. See `wording.mjs`.
   `- Call \`memory_add\` when you learn something durable: a user preference, a project convention, a decision and its reason, or a non-obvious pitfall. ${MEMORY_LENGTH} ${SPLIT_NOT_COMPRESS}`,
-  "- Call `memory_update` when something above turns out to be wrong or out of date. Memories are only ever added, never overwritten, so a correction stored as a new memory leaves both versions to come back in later searches.",
+  // The subject is `memory_add`, not the store. mem0's "sole operation is ADD"
+  // describes its extraction step, and generalising it to memories would be
+  // false here — `memory_update` really does replace the text, which is the
+  // whole reason this bullet points at it.
+  "- Call `memory_update` when something above turns out to be wrong or out of date. `memory_add` only ever adds, never replaces, so a correction stored that way leaves both versions to come back in later searches.",
   // Both retrieval signals mem0 fuses are English-bound, and the keyword one
   // fails outright rather than degrading: its lemmatiser matches /[a-z0-9]+/g,
-  // so a CJK memory becomes a single token that no query can hit.
+  // so a CJK memory never reaches the keyword index at all — not as an
+  // unsplittable token, as nothing. `KEEP_IDENTIFIERS` carries the consequence,
+  // and `queryReachWarning` catches the query side at runtime when this bullet
+  // is ignored, which is the only case it cannot prevent.
   `- Write memories and search queries in English, opening with the topic, even when the conversation is in another language. ${ENGLISH_ONLY} ${KEEP_IDENTIFIERS}`,
 ].join("\n");
 

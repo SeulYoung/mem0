@@ -144,8 +144,14 @@ function toRecord(item) {
     kind: metadata.kind ?? null,
     source: metadata.source ?? null,
     sourceHash: metadata.source_hash ?? null,
-    // mem0 stamps createdAt itself; we never write a timestamp of our own.
+    // mem0 stamps both itself; we never write a timestamp of our own.
     createdAt: item.createdAt ?? null,
+    // Only on a memory that has been rewritten: `createMemory` sets no
+    // `updatedAt`, `updateMemory` does. Carrying it matters because an edit
+    // deliberately keeps the original `createdAt`, so a corrected memory reads
+    // as older than the fact it now states — and how stale a memory looks is
+    // most of how anyone decides whether to trust it.
+    ...(item.updatedAt ? { updatedAt: item.updatedAt } : {}),
     score: item.score,
     // Only present once someone sets one. mem0 hides expired memories from
     // search and getAll on its own, so this is the one place they are visible.
@@ -219,10 +225,32 @@ export const KIND_GUIDE = {
   gotcha:
     "Behaviour that bites silently: not knowing it gets you code that looks right and is wrong, with no error to warn you. Say what goes wrong.",
   fact: "A measurement, or verified state of something outside your control. Nothing to obey and no symptom to avoid — a number or a shape you would otherwise have to work out again.",
+  context:
+    "Why one piece of work is happening and what it covers: the requirement behind it, the files and assets in scope, a design agreed but not yet built. Requires an expiresAt — it is true for a stretch of work, not indefinitely.",
   note: "None of the above, and still worth having next session. The fallback, and rarely the right answer.",
 };
 
 export const KINDS = Object.keys(KIND_GUIDE);
+
+/**
+ * Kinds that are refused without an expiry date.
+ *
+ * `context` exists because the catalog had a real gap and `note` was absorbing
+ * it: task background is not a taste, a rule, a reason, a symptom or a
+ * measurement, yet it is the first thing a session resuming that work wants.
+ * What kept it out was that it stops being true — so the expiry is the whole
+ * reason the kind can exist, and asking for it politely would leave the store
+ * accumulating permanent records of finished weeks. Enforced here rather than
+ * in the schema because the CLI writes memories too.
+ */
+const EXPIRING_KINDS = new Set(["context"]);
+
+function assertExpiry(kind, expiresAt) {
+  if (!EXPIRING_KINDS.has(kind) || expiresAt) return;
+  throw new Error(
+    `A "${kind}" memory needs an expiresAt (YYYY-MM-DD): it records work in flight, and nothing else in this store ever removes it.`,
+  );
+}
 
 /**
  * mem0 stores whatever kind it is handed, so a typo is not an error there — the
@@ -309,6 +337,7 @@ export async function addMemory({
 
   const { memory, config } = await openMemory();
   assertKind(kind, config);
+  assertExpiry(kind, expiresAt);
   const filters = scopeFilters(config, project, "project");
   const wantInfer = Boolean(infer) && Boolean(config.llm?.enabled);
 
@@ -408,6 +437,34 @@ export async function addMemory({
   });
   log("memory", `add project=${project.id} kind=${kind} source=${source} infer=${inferred} stored=${stored.length}`);
   return stored;
+}
+
+/**
+ * The one query shape this store cannot answer, named at the moment it is asked.
+ *
+ * Two of mem0's three signals are ASCII-bound: `lemmatizeForBm25` keeps only
+ * `/[a-z0-9]+/g`, and every entity extractor needs an ASCII letter or a quote.
+ * A query holding neither a Latin letter nor a digit therefore reaches the
+ * embedding model alone — an English model, scoring text it was never trained
+ * on. Measured against 45 real memories: two unrelated CJK queries both
+ * returned the memory holding the most Chinese characters, because "this text
+ * is Chinese" is most of what such an embedding encodes.
+ *
+ * A warning rather than a refusal. The ranking is arbitrary, not empty, and
+ * only the caller can tell whether the top hit happens to be the right one —
+ * what it must not do is arrive looking like an ordinary result set. The fix is
+ * the caller's too, and it is cheap: `ENGLISH_ONLY` means the memory being
+ * looked for is in English, so the query has an English form that works.
+ *
+ * Quoted CJK is deliberately not exempted, even though `extractQuoted` is the
+ * one extractor that accepts it. That route does fire, but it was measured to
+ * hand two unrelated queries the same boost profile, so reaching it changes
+ * nothing the caller should do differently.
+ */
+export function queryReachWarning(query) {
+  const text = String(query ?? "").trim();
+  if (!text || /[a-z0-9]/i.test(text)) return null;
+  return "This query has no Latin letters or digits, so mem0's keyword index and entity extractors both saw nothing and only the embedding model ran. That model is English-only, so it ranked these memories by how much non-English text they hold rather than by what they say. Treat the order as arbitrary and search again in English, using the words the memory itself would use.";
 }
 
 export async function searchMemories({
@@ -570,6 +627,10 @@ export async function updateMemory({ id, text, kind, expiresAt, project }) {
   const memoryId = record.id;
   const { memory, config } = await openMemory();
   if (hasKind) assertKind(kind, config);
+  // Judged on the state this edit would leave behind, not on what it supplies:
+  // the two ways to end up with an expiring kind and no expiry are promoting a
+  // memory into one and clearing the expiry of one already there.
+  assertExpiry(hasKind ? kind : record.kind, hasExpiry ? expiresAt : (record.expiresAt ?? null));
 
   // Only the keys being changed: mem0 merges this over the existing payload, so
   // anything left out (the repository, source, an expiry set earlier) is kept.

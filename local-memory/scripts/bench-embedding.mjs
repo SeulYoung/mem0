@@ -4,13 +4,19 @@
  * real memories, so the choice of embedding model and language is made on
  * numbers instead of intuition.
  *
- * Configurations compared:
- *   zh-small        current setup: bge-small-zh-v1.5, Chinese memories
- *   zh-small+instr  same, plus bge's Chinese query instruction on the query
- *   zh-e5           multilingual-e5-large, Chinese memories, query:/passage:
- *   en-small        English memories + English queries (translate on write)
- *   en-e5           same, on e5
- *   cross-e5        Chinese memories + English queries (translate on read only)
+ * Configurations compared (this list is the argument vocabulary, so keep it in
+ * step with CONFIGS below):
+ *   zh-small         bge-small-zh-v1.5, Chinese memories — the original setup
+ *   zh-small+instr   same, plus bge's Chinese query instruction on the query
+ *   zh-e5            multilingual-e5-large, Chinese memories, query:/passage:
+ *   en-on-zh-model   English memories read by the Chinese model — the trap of
+ *                    translating without also changing the model
+ *   en-bge-en        bge-small-en-v1.5, English memories — what this layer ships
+ *   en-bge-en+instr  same, plus the query instruction
+ *   en-e5            English memories on e5
+ *   bi-zh-query      both languages stored, Chinese queries
+ *   bi-en-query      both languages stored, English queries
+ *   cross-e5         Chinese memories, English queries (translate on read only)
  *
  * Reported per configuration:
  *   top1     share of queries whose best hit is the right memory
@@ -231,7 +237,17 @@ async function run(name) {
   };
 }
 
-const requested = process.argv.slice(2).filter((token) => CONFIGS[token]);
+// Silently dropping an unknown name would fall back to running everything,
+// which quietly pulls the 2GB e5 model down — so a name that is not a
+// configuration is an error, not a no-op.
+const requested = process.argv.slice(2);
+const unknown = requested.filter((token) => !CONFIGS[token]);
+if (unknown.length > 0) {
+  process.stderr.write(
+    `unknown configuration: ${unknown.join(", ")}\navailable: ${Object.keys(CONFIGS).join(", ")}\n`,
+  );
+  process.exit(2);
+}
 const wanted = requested.length > 0 ? requested : Object.keys(CONFIGS);
 
 process.stdout.write(`corpus: ${DOCS.length} memories, ${QUERIES.length} queries\n\n`);

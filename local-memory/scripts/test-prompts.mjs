@@ -37,15 +37,20 @@ out(`mem0 bundle: ${bundlePath} (${Math.round(bundle.length / 1024)} KB)`);
 /**
  * The sentences mem0's ADDITIVE_EXTRACTION_PROMPT states and this layer repeats.
  * Each is paired with what would silently go wrong here if mem0 dropped it.
+ *
+ * Two of them this layer now restates with a change rather than verbatim — see
+ * `MEMORY_LENGTH` — but they are still asserted, because the change is a
+ * deliberate departure from a standard that exists, and it stops being that the
+ * moment the standard does.
  */
 const UPSTREAM_CLAIMS = [
-  ["15-80 words", "the length band both agent-facing texts quote"],
-  ["up to 100 for detail-rich content", "the allowance that keeps the band from reading as a hard cap"],
+  ["15-80 words", "the band this layer keeps, having changed only what is counted"],
+  ["up to 100 for detail-rich content", "the allowance this layer's 120-word cap replaces"],
   ["completeness beats brevity", "the priority rule — without it the count outranks the content"],
   ["up to 3 for content with multiple proper nouns", "the three-sentence allowance memory_update used to contradict"],
   ["split into multiple focused memories", "the escape this layer renders as a second memory_add call"],
   ["### Self-Contained", "the standard the tools call self-contained"],
-  ["Your sole operation is ADD", "what memory_update means by memories are only ever added"],
+  ["Your sole operation is ADD", "what memory_update means by memory_add only ever adding"],
   ["## Custom Instructions", "the slot llm.customInstructions arrives in, and its priority"],
 ];
 
@@ -54,12 +59,14 @@ for (const [claim, why] of UPSTREAM_CLAIMS) {
 }
 
 /**
- * mem0's Python build carries a language block that calls translating into
- * English CRITICAL to avoid; the TS port never passes it, and the extraction
- * prompt has no language rule of its own. That absence is load-bearing: it is
- * why `llm.customInstructions` can ask for English without arguing with the
- * system prompt above it. If any of these appears, the policy needs rethinking
- * rather than repeating.
+ * Neither OSS build imposes a language of its own. The TS port has no
+ * `useInputLanguage` parameter, and the Python builder's `## Language
+ * Requirement` block — which calls translating into English CRITICAL to avoid —
+ * sits behind a flag `Memory.add` never passes. That absence is load-bearing: it
+ * is why `llm.customInstructions` can ask for English without arguing with the
+ * system prompt above it. What is read here is the TS bundle, so this guards the
+ * build this layer actually runs on. If any of these appears, the policy needs
+ * rethinking rather than repeating.
  */
 const LANGUAGE_MARKERS = ["SAME LANGUAGE", "detect the language", "Language Requirement", "in the same language"];
 for (const marker of LANGUAGE_MARKERS) {
@@ -69,6 +76,25 @@ for (const marker of LANGUAGE_MARKERS) {
     "the English-only policy in llm.customInstructions would now be contradicting mem0's own prompt",
   );
 }
+
+/**
+ * The two places this layer knowingly departs from mem0. Both look like tidy-up
+ * bait — an odd counting unit, a sentence about Chinese in a rule about
+ * identifiers — and deleting either one restores a contradiction rather than a
+ * simplification: without the first the count is spent on paths, and without
+ * the second `ENGLISH_ONLY` and `KEEP_IDENTIFIERS` give opposite instructions
+ * for a repository whose table names are Chinese.
+ */
+check(
+  "the length rule still counts prose only, and still names a ceiling",
+  /do not count towards that/.test(MEMORY_LENGTH) && /120/.test(MEMORY_LENGTH),
+  MEMORY_LENGTH,
+);
+check(
+  "the identifier rule still settles the case where the identifier is itself CJK",
+  /CJK/.test(KEEP_IDENTIFIERS),
+  KEEP_IDENTIFIERS,
+);
 
 // --- and every site still says it the same way -------------------------------
 

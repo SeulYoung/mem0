@@ -327,21 +327,25 @@ async function checkCapturedPromptIsEnglish() {
     "不要直接调用 UnrealPak，之前有人直调导致产物不一致。";
 
   const { fileURLToPath } = await import("node:url");
-  const hookPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "hooks", "before-submit-prompt.mjs");
-  await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [hookPath], { stdio: ["pipe", "ignore", "ignore"] });
-    child.on("error", reject);
-    child.on("close", () => resolve());
-    child.stdin.end(
-      JSON.stringify({
-        conversation_id: "language-probe",
-        hook_event_name: "beforeSubmitPrompt",
-        prompt: CHINESE_PROMPT,
-        workspace_roots: [root],
-        attachments: [],
-      }),
-    );
+  const hooks = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "hooks");
+  const runHook = (file, payload) =>
+    new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [path.join(hooks, file)], { stdio: ["pipe", "ignore", "ignore"] });
+      child.on("error", reject);
+      child.on("close", () => resolve());
+      child.stdin.end(JSON.stringify({ conversation_id: "language-probe", workspace_roots: [root], ...payload }));
+    });
+
+  await runHook("before-submit-prompt.mjs", {
+    hook_event_name: "beforeSubmitPrompt",
+    prompt: CHINESE_PROMPT,
+    attachments: [],
   });
+  // `stop` is not optional here. With `capture.includeResponse` on — the default
+  // — the prompt hook only parks the turn, and nothing reaches the worker until
+  // the turn ends. Without this the probe waits out its two minutes and then
+  // passes on the *next* run, off the turn this one left parked.
+  await runHook("stop.mjs", { hook_event_name: "stop", status: "completed", loop_count: 0 });
 
   // The worker is detached and calls the model, so give it room.
   let stored = [];

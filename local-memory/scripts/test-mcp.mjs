@@ -226,7 +226,16 @@ show("and written by the detached worker", claimed);
 if (!claimed) throw new Error("the claimed turn never reached the store");
 await call("memory_delete", { id: claimed.id });
 
-show("memory_search", await call("memory_search", { query: "本地记忆层放在哪里", topK: 3 }));
+// Deliberately pure CJK: this is the one query shape mem0's keyword index and
+// entity extractors cannot see at all, so the tool has to hand back a warning
+// rather than an ordering that looks earned. The English form of the same
+// question is the control — a warning that fires on both teaches the agent to
+// ignore it.
+const unreachable = await call("memory_search", { query: "本地记忆层放在哪里", topK: 3 });
+show("memory_search", unreachable);
+if (!unreachable.warning) throw new Error("a CJK-only query came back with no warning");
+const reachable = await call("memory_search", { query: "where does the local memory layer live", topK: 3 });
+if (reachable.warning) throw new Error(`an English query was warned about: ${reachable.warning}`);
 show("memory_list", await call("memory_list", { limit: 3 }));
 show("memory_stats", await call("memory_stats"));
 
