@@ -475,12 +475,14 @@ export async function searchMemories({
   // the tool's own argument, `--top` — overrides it.
   topK = null,
   scope = "project",
+  kind = null,
   explain = false,
   rerank = null,
   threshold = null,
 }) {
   const { memory, config } = await openMemory();
   await detectDimension();
+  if (kind) assertKind(kind, config);
 
   const limit = topK ?? config.search?.topK ?? DEFAULT_CONFIG.search.topK;
 
@@ -493,8 +495,19 @@ export async function searchMemories({
   const candidates = reranking ? Math.max(limit * 4, config.reranker?.candidates ?? 25) : limit;
   const floor = threshold ?? config.search?.threshold;
 
+  // `kind` rides along as an ordinary payload filter rather than through
+  // `scopeFilters`, whose job is which repository a query belongs to. mem0 spreads
+  // caller filters into the store's own filter object and matches any key against
+  // the flat payload, and `add` writes metadata flat (`{...metadata, data, ...}`),
+  // so `kind` is a top-level key there. The filter therefore applies inside the
+  // store, before top-k truncation, and to the keyword pass as well as the
+  // semantic one. mem0 rebuilds the entity-store filter from `user_id` /
+  // `agent_id` / `run_id` alone, so the entity boost keeps working.
+  const filters = scopeFilters(config, project, scope);
+  if (kind) filters.kind = kind;
+
   const raw = await memory.search(String(query ?? "").trim(), {
-    filters: scopeFilters(config, project, scope),
+    filters,
     topK: candidates,
     // mem0 fuses three signals (semantic, BM25 keyword, entity boost); with
     // explain on it reports each one's contribution per result.

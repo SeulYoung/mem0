@@ -254,6 +254,19 @@ export const DEFAULT_CONFIG = {
      * through memory_search but would otherwise crowd out the useful records.
      */
     kinds: ["preference", "convention", "decision", "gotcha", "fact", "context", "note"],
+    /**
+     * Kinds that each get the first pick of a slot, before recency fills the
+     * rest. Without this the whole list is whatever was stored most recently,
+     * and the memories worth having are the ones that are structurally old: a
+     * convention and a preference read as instructions, and a decision is why
+     * the code looks the way it does. `gotcha` and `fact` are left out because
+     * they usually arrive alongside recent work and are already near the front.
+     *
+     * Order is the order they are picked in, and it is also the order they are
+     * injected in. Keep it short — every reserved kind is a slot recency does
+     * not get, and mem0's own plugin reserves two.
+     */
+    reserve: ["convention", "preference", "decision"],
     /** Also tell the agent how to use the memory tools every session. */
     includeProtocol: true,
   },

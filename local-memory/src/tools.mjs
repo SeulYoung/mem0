@@ -60,6 +60,16 @@ export function memoryTools(config) {
             maximum: 50,
             description: `How many memories to return (default ${config.search.topK}). Raise it when the first answer looks incomplete; the results are ordered, so the extra ones are weaker matches rather than more of the same.`,
           },
+          // Narrowing happens inside the store, before the result set is cut, so
+          // a filtered search is not the unfiltered one with rows removed — it
+          // reaches deeper into that one category. That is the whole point: the
+          // rules of a repository are outnumbered by everything else in it.
+          kind: {
+            type: "string",
+            enum: KINDS,
+            description:
+              "Restrict the search to one category. Use it to ask a question the unfiltered search would answer with whatever is most similar overall: `convention` for what this repository expects of you, `decision` for why something is the way it is, `gotcha` for what breaks silently. Leave it out to search everything.",
+          },
           scope: SCOPE_READ,
         },
         required: ["query"],

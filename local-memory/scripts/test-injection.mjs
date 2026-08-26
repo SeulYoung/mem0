@@ -11,6 +11,10 @@
  *   - `recent` still caps the list once the budget stops binding
  *   - nothing fitting yields no lines, which is what lets the caller say so
  *     instead of reporting the repository as empty
+ *   - a reserved kind reaches a session from outside the recency window, costs
+ *     nothing when the store holds none of it, and is never injected twice
+ *   - the shipped `reserve` is a subset of the shipped whitelist, so no slot is
+ *     promised to a kind that injection filters out anyway
  *   - a config.json written by an older version picks the corrected budget and
  *     the current kind whitelist up, while a choice made by hand survives
  *
@@ -91,13 +95,94 @@ const many = Array.from({ length: 20 }, (_, index) => record(`n${index}`, 50));
 const capped = selectInjectionLines(many, { recent: 5, maxChars: 100000 });
 check("inject.recent caps the list when the budget is generous", capped.length === 5, `${capped.length} line(s)`);
 
+// --- a reserved kind reaches the session from outside the window --------------
+// The defect this half exists for: recency spends every slot on the day's work,
+// so a convention — old by nature — is missing exactly when the newest memories
+// are the least validated ones.
+const notesThenConvention = [
+  ...Array.from({ length: 10 }, (_, index) => record(`p${index}`, 50)),
+  record("con", 50, "convention"),
+];
+const withReserve = selectInjectionLines(notesThenConvention, {
+  recent: 5,
+  maxChars: 100000,
+  reserve: ["convention"],
+});
+check(
+  "a reserved kind is injected even when it is nowhere near the newest records",
+  withReserve.length === 5 && idsIn(withReserve)[0] === "con-0000",
+  idsIn(withReserve).join(", "),
+);
+
+// A reserved kind the store has none of must not cost the slot: otherwise every
+// repository pays for the kinds it does not use, and a store of nothing but
+// notes would inject fewer memories than before this existed.
+const noneOfThatKind = selectInjectionLines(notesThenConvention, {
+  recent: 5,
+  maxChars: 100000,
+  reserve: ["preference"],
+});
+check(
+  "a reserved kind with no memories costs nothing",
+  noneOfThatKind.length === 5 && !idsIn(noneOfThatKind).includes("con-0000"),
+  idsIn(noneOfThatKind).join(", "),
+);
+
+// The reserve pass and the recency pass see the same records, so a reserved
+// memory that is also one of the newest would be rendered twice — a duplicate
+// costs a slot and reads as emphasis.
+const conventionIsNewest = [record("con", 50, "convention"), record("q1", 50), record("q2", 50)];
+const deduped = selectInjectionLines(conventionIsNewest, {
+  recent: 3,
+  maxChars: 100000,
+  reserve: ["convention"],
+});
+check(
+  "a reserved memory already in the window is injected once",
+  new Set(idsIn(deduped)).size === deduped.length && deduped.length === 3,
+  idsIn(deduped).join(", "),
+);
+
+// `recent` is the ceiling on the whole list, not on the recency pass alone.
+const reserveOverflow = selectInjectionLines(
+  [record("con", 50, "convention"), record("pre", 50, "preference"), record("dec", 50, "decision")],
+  { recent: 2, maxChars: 100000, reserve: ["convention", "preference", "decision"] },
+);
+check(
+  "reserved kinds cannot push the list past inject.recent",
+  reserveOverflow.length === 2,
+  `${reserveOverflow.length} line(s)`,
+);
+
+// --- reserve and the whitelist must not contradict each other -----------------
+// The whitelist is applied before selection, so a kind reserved but not
+// whitelisted is a slot promised to memories that never arrive — the same shape
+// of silent lie as a budget too small for `recent`.
+const { reserve, kinds } = loadConfig().inject;
+check(
+  "every reserved kind is one injection is allowed to carry",
+  reserve.every((kind) => kinds.includes(kind)),
+  `reserve [${reserve.join(", ")}] against [${kinds.join(", ")}]`,
+);
+check(
+  "the reserve leaves room for recency",
+  reserve.length < recent,
+  `${reserve.length} reserved of ${recent} slots`,
+);
+
 // --- what did not fit still has to be reachable -------------------------------
-// Selection is recency-only, so an old convention loses its slot to the day's
-// incidental notes. The protocol is what keeps it reachable anyway, which makes
-// its instruction to search a load-bearing part of injection, not decoration.
+// Reserving a few kinds narrows the gap but does not close it: the store holds
+// more conventions than the one slot carries. The protocol is what keeps the
+// rest reachable, which makes its instruction to search a load-bearing part of
+// injection rather than decoration — and in an ACP host, where no hook fires per
+// turn, the only query-time retrieval that happens at all.
 check(
   "the protocol tells the agent to search beyond what was injected",
   MEMORY_PROTOCOL.includes("memory_search") && MEMORY_PROTOCOL.includes("memory_add"),
+);
+check(
+  "the protocol names the searches to run rather than asking for a search",
+  MEMORY_PROTOCOL.includes('kind: "convention"') && MEMORY_PROTOCOL.includes('kind: "decision"'),
 );
 
 // --- an existing install has to pick the corrected budget up ------------------

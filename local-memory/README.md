@@ -131,7 +131,7 @@ node scripts/test-hooks.mjs D:\UGit\HappyArenaTMR\HappyArena
 
 **两边混用是安全的**：记忆库、仓库归属、判重都不分宿主，同一个仓库在 Cursor 里记下的东西在 CLion 里搜得到，反之亦然。差别只在"有没有人替你记"。
 
-写记忆时该用哪个 `kind`、注入为什么只有最近几条，见 [DESIGN.md](DESIGN.md#kind一份自己的类别词表)。想手动管理时用 CLI：
+写记忆时该用哪个 `kind`、注入凭什么挑那几条，见 [DESIGN.md](DESIGN.md#kind一份自己的类别词表)。想手动管理时用 CLI：
 
 ```powershell
 node src/cli.mjs doctor                              # 健康检查（存储 / 嵌入 / 总结模型 / Cursor 接线）
@@ -141,6 +141,7 @@ node src/cli.mjs add "这条只在 5.4 期间成立" --expires 2026-12-31   # �
 node src/cli.mjs add "本次需求的背景与范围..." --kind context --expires 2026-09-30   # context 不给 --expires 会被拒
 node src/cli.mjs add "和已有记忆很像但确实是两回事" --force        # 硬写，跳过语义判重
 node src/cli.mjs search "how to write a commit message" --top 5   # 不给 --top 就用 search.topK；加 --all 搜索所有仓库
+node src/cli.mjs search "how to run the tests" --kind convention  # 只在一个类别里搜，缩小发生在截断之前
 node src/cli.mjs search "10.BuildPC.bat" --explain   # 打印三路信号各贡献了多少
 node src/cli.mjs search "build script" --no-rerank   # 只看三路融合排序，对比重排效果
 node src/cli.mjs search "构建脚本"                   # 查询也要用英文：纯中文只有语义一路能跑，会在 stderr 上警告
@@ -176,13 +177,13 @@ node src/cli.mjs watch                               # 立刻巡检一次（加 
 | `dedupe.similarity` | 判为"说的是同一件事"的余弦阈值，默认 0.92 |
 | `prune.*` | 每月清理：`expiredGraceDays`（过期后再留多久才真删，默认 30）、`dayOfMonth`。前者在清理时才读，改了不用重新注册任务 |
 | `capture.*` | 自动记录的开关与过滤：长度上下限、跳过前缀、`kind`、是否提炼；以及按轮捕获的三个字段 `includeResponse` / `maxResponseChars` / `turnTimeoutMinutes` |
-| `inject.*` | 会话注入：总开关、两条通道各自的开关、`recent` 条数、`maxChars` 字符上限、`kinds` 白名单、`includeProtocol` |
+| `inject.*` | 会话注入：总开关、两条通道各自的开关、`recent` 条数、`maxChars` 字符上限、`kinds` 白名单、`reserve`（哪些类别各占一个保底名额，其余名额按时间填）、`includeProtocol` |
 | `watchdog.*` | 失效告警：开关、巡检间隔、重复弹窗间隔、探活超时、是否弹窗 |
 | `telemetry` | 默认 `false`，已关闭 mem0 的匿名遥测 |
 
 环境变量（临时覆盖，不改文件）：`MEM0_LOCAL_NO_LLM=1` 关掉总结模型，`MEM0_LOCAL_NO_RERANK=1` 关掉重排，`MEM0_LOCAL_USER_ID` 换归属者，`MEM0_LOCAL_HOME` 换数据目录。
 
-**改默认值不会自动生效——除了登记过的那几个。** 首次运行会把整份默认配置快照写进 `config.json`，此后源码里改默认值只对新机器有效。`src/config.mjs` 的 `SUPERSEDED_DEFAULTS` 表专门解决这个：登记"哪个字段的旧默认值已作废"，只在磁盘上的值仍等于那个旧默认值时丢弃并重写文件，自己动手调过的数字不受影响。目前表里只有 `inject.maxChars`（2500 → 5000）。
+**改默认值不会自动生效——除了登记过的那几个。** 首次运行会把整份默认配置快照写进 `config.json`，此后源码里改默认值只对新机器有效。`src/config.mjs` 的 `SUPERSEDED_DEFAULTS` 表专门解决这个：登记"哪个字段的旧默认值已作废"，只在磁盘上的值仍等于那个旧默认值时丢弃并重写文件，自己动手调过的数字不受影响。目前表里有两条：`inject.maxChars`（2500 → 5000）和 `inject.kinds`（补上后来才有的 `context`）。新增字段不用登记——`config.json` 里没有的键会直接取默认值，这张表只管"既有键的旧默认值作废"这一种情况。
 
 **接本地 Ollama 或公司内网网关**（都属于 OpenAI 兼容端点，这条路不经过 Cursor）：
 
@@ -216,7 +217,7 @@ node scripts/test-hooks.mjs       # 真实 hook 载荷驱动四个 hook：按轮
 node scripts/test-hooks.mjs D:\path\to\other\repo   # 指定仓库，验证某个工程的接线
 node scripts/test-retrieval.mjs   # 三路信号、重排、判重两道、到期日、实体链接、跨仓库读写边界
 node scripts/test-cli.mjs         # 真起 CLI 进程：参数解析、--explain、短 id 改正、变更历史、到期日与清理
-node scripts/test-injection.mjs   # 注入实际发出多少条：预算、两个上限、老 config.json 迁移
+node scripts/test-injection.mjs   # 注入实际发出哪几条：预算、两个上限、保底名额、老 config.json 迁移
 node scripts/test-health.mjs      # 失效告警：环境指纹、心跳、抑制窗口、真实探活（--notify 真弹一条）
 
 node scripts/test-llm.mjs         # 抽取路径：作用域用桩模型验（免费），再真调 4 次模型（约 50 秒）
@@ -293,7 +294,7 @@ Remove-Item -Recurse $env:USERPROFILE\.mem0-local   # 如果连数据一起删
 - **没有跨仓库的「全局记忆」。** 归属用的是 mem0 的 `agent_id`，一次查询只接受一个值，所以"本仓库 + 全局"一次读不出来；一条记忆归哪个仓库也是写入时定的，改归属得跑 `rekey-project.mjs`。理由和代价见 [DESIGN.md](DESIGN.md#仓库标识就是-mem0-的-agent_id)。真需要一条到处可见的偏好，就在用得到的仓库里各写一条。
 - **自动记录的记忆要等这一轮结束才出现。** 一轮对话是记忆的单位，而 AI 的回答只有到 `stop` 才完整；这一轮被中断（关窗口、切走）就只记下 prompt 那一半，且要等下一条 prompt 或下一个会话才补写。想回到"发出即记录"就把 `capture.includeResponse` 关掉。
 - **AI 的回答只留尾部 `capture.maxResponseChars` 个字符**（默认 2000）。一轮的结论通常在最后，但一个把关键事实说在开头、之后又跑了几十次工具调用的回答，会只剩下后面那些无关的部分。
-- Cursor 的 `beforeSubmitPrompt` hook 官方**不支持注入上下文**，所以"每轮对话按当前问题自动检索"做不到确定性实现。检索发生在两处：会话开始时注入 + AI 需要时主动搜索。注入的协议文本会明确提醒 AI 去搜。
+- Cursor 的 `beforeSubmitPrompt` hook 官方**不支持注入上下文**，所以"每轮对话按当前问题自动检索"做不到确定性实现。检索发生在两处：会话开始时注入 + AI 主动搜索。注入的协议文本不止提醒去搜，而是点名开场要跑哪两条按 `kind` 过滤的搜索（`convention` 和 `decision`）——照搬 mem0 自己插件的做法，理由见 [DESIGN.md](DESIGN.md#会话注入的两条通道)。
 - **ACP 宿主（JetBrains IDE 等）不执行 Cursor 的任何 hook**，Cloud Agents 也不加载用户级 `~/.cursor/hooks.json`。两边的会话注入都由 MCP `instructions` 覆盖，缺的是自动记录一轮对话，只能靠 AI 主动调 `memory_add`（逐项对照见[上面那张表](#两类宿主分别能拿到什么)）。
 - **注入通道被上游砍掉是唯一没被监控的失效**：cursor-agent 转发 MCP `instructions` 是实测行为、不是有契约的 API，真没了的话工具还在、巡检全绿，只有注入静默消失。
 - 首次运行下载嵌入模型（约 50MB），首次搜索再下载重排模型（约 87MB）。之后嵌入、检索、重排全部离线；开着总结模型时抽取那一步会出网到 Cursor。

@@ -5,7 +5,7 @@
  *
  *   node src/cli.mjs doctor
  *   node src/cli.mjs add "..." [--kind preference] [--expires 2026-12-31] [--force]
- *   node src/cli.mjs search "..." [--all] [--top 5] [--explain] [--no-rerank]
+ *   node src/cli.mjs search "..." [--all] [--kind convention] [--top 5] [--explain] [--no-rerank]
  *   node src/cli.mjs list [--all] [--limit 20]
  *   node src/cli.mjs stats
  *   node src/cli.mjs update <id> ["new text"] [--kind k] [--expires 2026-12-31] [--clear-expiry]
@@ -369,11 +369,12 @@ switch (command) {
     const query = positional.join(" ");
     if (!query) {
       throw new Error(
-        'Usage: node src/cli.mjs search "what you are looking for" [--all] [--top 5] [--explain] [--no-rerank] [--threshold 0.2]',
+        'Usage: node src/cli.mjs search "what you are looking for" [--all] [--kind convention] [--top 5] [--explain] [--no-rerank] [--threshold 0.2]',
       );
     }
     const threshold = flag("threshold", null);
     const top = flag("top", null);
+    const searchKind = flag("kind", null);
     // Before the list, not after it: a caveat printed under six results has
     // already been overtaken by the reader.
     const warning = queryReachWarning(query);
@@ -385,6 +386,10 @@ switch (command) {
         // Null leaves `search.topK` in charge, like the memory_search tool does.
         topK: top === null ? null : Number(top),
         scope,
+        // A bare `--kind` reaches `assertKind` as `true` and is refused by name,
+        // which is what `add` does too: silently searching everything would look
+        // like the filter had been applied and found little.
+        kind: searchKind,
         explain: Boolean(flag("explain", false)),
         // Both null unless asked for, which is what leaves the configured
         // behaviour in charge.
@@ -486,8 +491,9 @@ switch (command) {
         "                                  store a memory (--infer distils it through the model,",
         "                                  --force stores it despite a near-identical existing one)",
         `                                  kinds: ${KINDS.join(" | ")} — see DESIGN.md for what each one means`,
-        '  search "query" [--all] [--top n] [--explain] [--no-rerank] [--threshold t]',
-        "                                  search; --explain shows each retrieval signal",
+        '  search "query" [--all] [--kind k] [--top n] [--explain] [--no-rerank] [--threshold t]',
+        "                                  search; --kind narrows to one category before the cut,",
+        "                                  --explain shows each retrieval signal",
         "  list [--all] [--limit n] [--expired]   newest memories first; --expired also shows expired ones",
         "  stats                           counts by repository and kind",
         '  update <id> ["new text"] [--kind k] [--expires YYYY-MM-DD] [--clear-expiry]',

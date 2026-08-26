@@ -14,13 +14,21 @@ import { ENGLISH_ONLY, KEEP_IDENTIFIERS, MEMORY_LENGTH, SPLIT_NOT_COMPRESS } fro
 
 export const MEMORY_PROTOCOL = [
   "Memory protocol for this session:",
-  // The list is the newest few memories and nothing else — a founding decision
-  // is by nature old, so the one memory most worth having is the one most
-  // likely to be missing. Search is what makes it reachable, and an agent only
-  // searches if it knows the list is partial.
+  // The list is the newest few memories plus the newest of each reserved kind,
+  // which is still a fraction of the store: a repository's rules outnumber the
+  // slots. Search is what makes the rest reachable, and an agent only searches
+  // if it knows the list is partial.
   // Phrased so it stays true when nothing was injected at all, which is what
   // the empty-repository and budget-starved cases both produce.
-  "- Injection carries at most a handful of the newest memories, so anything older is reachable only by searching. Call `memory_search` before answering anything that may depend on earlier sessions, before following a project convention you have not checked, and whenever the user refers to past work.",
+  //
+  // Naming the two searches rather than asking for a search is mem0's own
+  // shape — its plugin's session-start hook says "Run 2 parallel searches: one
+  // for decision type, one for task_learning type". The reason to copy it is
+  // that an agent told only to search picks what to search for, and what it
+  // picks is the topic in front of it, never the convention it is about to
+  // break. In an ACP host this is also the only query-time retrieval there is:
+  // no hook fires per turn, so nothing but the agent can run one.
+  '- The list above is partial, so most of what this repository knows is reachable only by searching. Open every session with two `memory_search` calls before your first substantive answer — `kind: "convention"` for what this repository expects of you, `kind: "decision"` for why things are the way they are — and search again before following a convention you have not checked, and whenever the user refers to past work.',
   // mem0's own rules, restated because the default write path is verbatim and
   // never runs the prompt that states them. See `wording.mjs`.
   `- Call \`memory_add\` when you learn something durable: a user preference, a project convention, a decision and its reason, or a non-obvious pitfall. ${MEMORY_LENGTH} ${SPLIT_NOT_COMPRESS}`,
@@ -41,14 +49,49 @@ export const MEMORY_PROTOCOL = [
 /**
  * The memories that fit, rendered as the lines they will be injected as.
  *
+ * Two passes, because recency alone spends every slot on the same kind of
+ * thing. A founding convention is by nature old, so on a repository with any
+ * activity it never makes the newest `recent` — the list fills with whatever was
+ * learned that day, which is also the least validated thing in the store, and
+ * worst exactly when a line of work has just been rolled back. So each kind
+ * named in `reserve` gets its newest memory first, and recency fills what is
+ * left.
+ *
+ * `reserve` is a short list rather than the whole catalog on purpose. mem0's own
+ * plugin names two types at session start (`on_session_start.sh` asks for
+ * `decision` and `task_learning`) and leaves the rest to its query-driven path.
+ * Reserving all seven kinds here would spend the budget on one of each and
+ * leave no room for what happened recently, which is the one thing recency is
+ * genuinely good at.
+ *
+ * A reserved kind with no memories costs nothing: the slot falls through to the
+ * recency pass, so a store holding only notes behaves exactly as before. A kind
+ * reserved but absent from `inject.kinds` also finds nothing, because the
+ * whitelist has already been applied to `records` — the whitelist wins, which is
+ * the only order that lets it mean "never inject this".
+ *
  * Exported on its own because the budget is where injection quietly loses
  * memories, and a test that went through the store instead would be at the
  * mercy of whatever the repository happens to hold.
  */
-export function selectInjectionLines(records, { recent, maxChars }) {
+export function selectInjectionLines(records, { recent, maxChars, reserve = [] }) {
+  // `records` arrives newest first, so the first match is the newest of its kind.
+  // Within one kind recency is all there is to go on: injection has no query.
+  const reserved = reserve
+    .map((kind) => records.find((record) => (record.kind ?? "note") === kind))
+    .filter(Boolean);
+
   const lines = [];
+  const taken = new Set();
   let budget = maxChars;
-  for (const record of records.slice(0, recent)) {
+
+  // The recency pass keeps looking at the newest `recent` and no further, so
+  // `recent` still describes a window over the store rather than a quota to be
+  // filled from arbitrarily far back. Reserved memories are the only ones that
+  // may come from outside it.
+  for (const record of [...reserved, ...records.slice(0, recent)]) {
+    if (lines.length >= recent) break;
+    if (taken.has(record.id)) continue;
     const line = `- [${record.kind ?? "note"}] ${record.text} (id: ${record.id.slice(0, 8)})`;
     // A memory too long for what is left is skipped, not taken as the end of
     // the list. Stopping at the first one that did not fit made every memory
@@ -56,6 +99,7 @@ export function selectInjectionLines(records, { recent, maxChars }) {
     // to precede the first long record.
     if (line.length > budget) continue;
     budget -= line.length;
+    taken.add(record.id);
     lines.push(line);
   }
   return lines;

@@ -64,6 +64,7 @@ async function runTool(name, args) {
         project,
         topK: args.topK ?? null,
         scope: args.scope ?? "project",
+        kind: args.kind ?? null,
       });
       // Ahead of the results rather than beside them: an agent that reads the
       // hits first has already started trusting an arbitrary ordering.

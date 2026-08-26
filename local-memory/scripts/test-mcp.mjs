@@ -236,6 +236,26 @@ show("memory_search", unreachable);
 if (!unreachable.warning) throw new Error("a CJK-only query came back with no warning");
 const reachable = await call("memory_search", { query: "where does the local memory layer live", topK: 3 });
 if (reachable.warning) throw new Error(`an English query was warned about: ${reachable.warning}`);
+
+// The kind filter is what makes the injected protocol's two opening searches
+// possible, and it has to narrow inside mem0's store rather than after the cut —
+// so what it must never do is hand back a memory of another kind.
+//
+// The fixture is the control, and by now it is a `decision`: the memory_update
+// case above stored it as one. Filtering for the kind it was *added* as finds
+// nothing, correctly, which is the shape this assertion had to be talked out of.
+const GLOSS = "the local memory layer lives in the local-memory directory and prompts reach the model over stdin";
+const sameKind = await call("memory_search", { query: GLOSS, kind: "decision", topK: 5 });
+show("memory_search kind=decision", sameKind);
+const strayKind = (sameKind.results ?? []).find((record) => record.kind !== "decision");
+if (strayKind) throw new Error(`a search filtered to decisions returned a "${strayKind.kind}" memory`);
+if (!(sameKind.results ?? []).some((record) => record.id === added.ids[0])) {
+  throw new Error("the fixture was not found by a search filtered to its own kind");
+}
+const otherKind = await call("memory_search", { query: GLOSS, kind: "convention", topK: 5 });
+if ((otherKind.results ?? []).some((record) => record.id === added.ids[0])) {
+  throw new Error("a decision came back from a search filtered to conventions");
+}
 show("memory_list", await call("memory_list", { limit: 3 }));
 show("memory_stats", await call("memory_stats"));
 
