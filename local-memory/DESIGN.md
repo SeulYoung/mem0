@@ -197,6 +197,14 @@ mem0 的事实抽取
 | 看出它被改过 | 检索与列表返回里的 `updatedAt`；`cli list/search` 的 `edited=` 列 | 保留原始 `createdAt` 的代价是**改过的记忆看起来比它陈述的事实旧**，而"这是什么时候写的"正是判断它是否过时的主要依据。mem0 在 `search`/`get`/`getAll` 里一直返回 `updatedAt`，只是本层的 `toRecord` 早先没抄过来 |
 | 设到期日 | `memory_update` 的 `expiresAt`；`cli add/update --expires` | 过期后 mem0 自己把它从 `search` 和 `getAll` 里滤掉，于是也不再进下一个会话的注入。这是本地唯一真正意义上的自动淘汰 |
 
+### 可信度是证据强度，不是第四种检索分
+
+`confidence` 是本层通过 mem0 公开 `metadata` 接入的 `[0, 1]` 数字，但写入者不直接猜小数：它选择离散的 `evidence`，本层确定性映射为 `user_confirmed=1`、`verified=0.9`、`stated=0.7`、`inferred=0.4`、`disputed=0.2`。新记录默认 `stated`，与 mem0 官方插件自动捕获的 `0.7` 一致；非默认等级必须同时写 `confidence_reason`。原因只说明证据、不重复正文，限一句和 240 字符；它是 metadata，不套用记忆正文的 15–80 词规则。`verified` 和 `user_confirmed` 自动记下 `verified_at`，也可显式传入真实的历史值；为容忍客户端时钟偏差，最多接受比服务端当前时间晚五分钟的值。保持这两个等级时不能清空时间，降级 evidence 会自动清空。接入此模型前的记录已一次性归一为 `stated/0.7`；未评分不是运行时支持的状态，缺少证据元数据会由 `audit` 报为不一致。
+
+它故意不与 `score`、`rerankScore` 或 `score_details.semanticScore` 混合。后三者都回答"这条记忆和当前查询有多相关"，会随查询和候选集变化；`confidence` 回答"写下这件事时的证据有多可靠"，属于记忆本身。把两者相乘会让一条高度相关但待核实的记忆静默消失，也会让一个与查询无关的确定事实因为 `1.0` 被错误抬高。因此当前只落进 metadata、在搜索/列表/ACP 注入中显示，并允许 `memory_update` 在新证据出现时改等级。低于 `0.5` 的记忆不拿 `inject.reserve` 的保底名额，但仍会从时间序进入并标成 `VERIFY`，也始终可以搜索到。
+
+当前没有自动升降、低分过滤或按分清理。被搜到不是被证实，时间变老不是变假，模型重复说一遍也不是独立证据；只有用户确认、代码/测试/配置验证、推断或未解决矛盾这类真实事件能改 `evidence`，并且必须留下原因。`confidence` 也不会取代 `memory_update`：事实被纠正时仍要就地改正文和等级。CLI 的 `audit` 只读报告旧的未评分或字段不一致记录、低于 `0.5`、争议、高可信却没有 `verified_at`、以及验证时间超过指定天数的记忆，不自动修、不自动删。
+
 **就地改正唯一销毁的东西是旧正文，所以要有地方能看回去。** mem0 每次 ADD / UPDATE / DELETE 都往历史库写一行、并且带着被替换掉的那段文本，但它自己从不读回来。`cli history <id>` 就是这个读口，给的是"怀疑上次 `memory_update` 把正文改坏了"这一种场合。三个决定：
 
 - **只加 CLI，不加 MCP 工具。** MCP 工具的 schema 每个会话都要进上下文，而这是个排查动作、不是 AI 平时该做的事，为它常驻一份描述不划算。
@@ -317,7 +325,7 @@ watchdog            all 3 runtime(s) ok 0m ago; scheduled task registered
 
 **输出契约完整生效**：mem0 用严格 schema 校验模型回复（每条要求字符串 `id` 和 `text`，可选 `attributed_to` / `linked_memory_ids`），失败才退到宽松解析。实测真实模型经过本层的 prompt 拼装后走的是严格分支，`attributedTo` 也已透传到 CLI 与 MCP 的返回里。
 
-**本层只额外附加 4 个 metadata 键**（`project_name` / `kind` / `source` / `source_hash`），均不与 mem0 的保留键（`data`/`hash`/`createdAt`/`updatedAt`/`textLemmatized`/`user_id`/`agent_id`/`run_id`/`expiration_date`）重名。已确认 `infer: true` 路径下这些键同样完整落库，所以开模型不会破坏项目隔离。`project_name` 只用于显示——每个 clone 的目录名都一样，它不是能用来分仓库的东西。
+**本层只额外附加 8 个 metadata 键**（`project_name` / `kind` / `source` / `source_hash` / `confidence` / `evidence` / `confidence_reason` / `verified_at`），均不与 mem0 的保留键（`data`/`hash`/`createdAt`/`updatedAt`/`textLemmatized`/`user_id`/`agent_id`/`run_id`/`expiration_date`）重名。已确认 `infer: true` 路径下这些键同样完整落库，所以开模型不会破坏项目隔离。`project_name` 只用于显示——每个 clone 的目录名都一样，它不是能用来分仓库的东西。
 
 ### 仓库标识就是 mem0 的 agent_id
 

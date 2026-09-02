@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 
 import { loadConfig } from "../src/config.mjs";
 import { MEMORY_PROTOCOL } from "../src/injection.mjs";
+import { MAX_CONFIDENCE_REASON_CHARS } from "../src/memory.mjs";
 import { memoryTools } from "../src/tools.mjs";
 import { ENGLISH_ONLY, KEEP_IDENTIFIERS, MEMORY_LENGTH, SPLIT_NOT_COMPRESS } from "../src/wording.mjs";
 
@@ -133,6 +134,33 @@ check(
   "memory_update points at memory_add instead of restating its own length rule",
   updateText.includes("memory_add describes") && !/\bsentence\b/.test(updateText),
   updateText,
+);
+check(
+  "both write tools derive confidence from named evidence",
+  add.inputSchema.properties.evidence.description.includes("mapped to confidence") &&
+    add.inputSchema.properties.evidence.description.includes("stated: unchecked explicit claim") &&
+    add.inputSchema.properties.evidence.enum.includes("user_confirmed") &&
+    update.inputSchema.properties.evidence.description.includes("memory_add's levels") &&
+    update.inputSchema.properties.evidence.description.includes("real evidence event") &&
+    update.inputSchema.properties.confidenceReason.description.includes("Required when changing evidence"),
+);
+check(
+  "both confidence reasons are short evidence accounts, not duplicate memories",
+  add.inputSchema.properties.confidenceReason.maxLength === MAX_CONFIDENCE_REASON_CHARS &&
+    update.inputSchema.properties.confidenceReason.maxLength === MAX_CONFIDENCE_REASON_CHARS &&
+    add.inputSchema.properties.confidenceReason.description.includes("One short sentence") &&
+    add.inputSchema.properties.confidenceReason.description.includes("without repeating the memory"),
+);
+check(
+  "verifiedAt descriptions match the validator and avoid needless timestamps",
+  add.inputSchema.properties.verifiedAt.description.includes("Only valid for those levels") &&
+    add.inputSchema.properties.verifiedAt.description.includes("server timestamps high evidence now") &&
+    add.inputSchema.properties.verifiedAt.description.includes("over five minutes ahead are rejected") &&
+    add.inputSchema.properties.verifiedAt.format === "date-time" &&
+    update.inputSchema.properties.verifiedAt.description.includes("omission preserves the existing time") &&
+    update.inputSchema.properties.verifiedAt.description.includes("Downgrading evidence clears it automatically") &&
+    update.inputSchema.properties.verifiedAt.type === "string" &&
+    update.inputSchema.properties.verifiedAt.format === "date-time",
 );
 
 /**

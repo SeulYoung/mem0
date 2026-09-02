@@ -37,6 +37,7 @@ export const MEMORY_PROTOCOL = [
   // false here — `memory_update` really does replace the text, which is the
   // whole reason this bullet points at it.
   "- Call `memory_update` when something above turns out to be wrong or out of date. `memory_add` only ever adds, never replaces, so a correction stored that way leaves both versions to come back in later searches.",
+  "- `confidence` is evidence strength, not search relevance, and is derived from `evidence`. Set or change `evidence` only after real confirmation, verification, inference or unresolved contradiction — never after search, repetition or age. Verify injected memories marked `VERIFY` before acting. Confidence does not affect search ranking or deletion.",
   // Both retrieval signals mem0 fuses are English-bound, and the keyword one
   // fails outright rather than degrading: its lemmatiser matches /[a-z0-9]+/g,
   // so a CJK memory never reaches the keyword index at all — not as an
@@ -78,7 +79,14 @@ export function selectInjectionLines(records, { recent, maxChars, reserve = [] }
   // `records` arrives newest first, so the first match is the newest of its kind.
   // Within one kind recency is all there is to go on: injection has no query.
   const reserved = reserve
-    .map((kind) => records.find((record) => (record.kind ?? "note") === kind))
+    // A disputed or inferred instruction must not win a protected slot merely
+    // because it is a convention or decision. It can still arrive through the
+    // recency pass below and remains searchable.
+    .map((kind) =>
+      records.find(
+        (record) => (record.kind ?? "note") === kind && record.confidence >= 0.5,
+      ),
+    )
     .filter(Boolean);
 
   const lines = [];
@@ -92,7 +100,8 @@ export function selectInjectionLines(records, { recent, maxChars, reserve = [] }
   for (const record of [...reserved, ...records.slice(0, recent)]) {
     if (lines.length >= recent) break;
     if (taken.has(record.id)) continue;
-    const line = `- [${record.kind ?? "note"}] ${record.text} (id: ${record.id.slice(0, 8)})`;
+    const assessed = ` [evidence=${record.evidence}${record.confidence < 0.5 ? " VERIFY" : ""}]`;
+    const line = `- [${record.kind ?? "note"}] ${record.text}${assessed} (id: ${record.id.slice(0, 8)})`;
     // A memory too long for what is left is skipped, not taken as the end of
     // the list. Stopping at the first one that did not fit made every memory
     // behind it invisible, so `recent` silently collapsed to whatever happened

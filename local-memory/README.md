@@ -96,6 +96,7 @@ node scripts/test-hooks.mjs D:\UGit\HappyArenaTMR\HappyArena
 - 每个新会话开始时，本仓库的既有记忆会被自动注入（两条通道，宿主无关）
 - AI 学到值得长期记住的东西（偏好、约定、决策理由、坑）时会调 `memory_add`；同一句事实写第二次会被挡掉，换个说法写也会被挡掉并告诉它撞上了哪一条
 - AI 需要回忆过去时会调 `memory_search`（自动记录的对话也在检索范围内）。**查询也得是英文**：不含任何 ASCII 字母或数字的查询只有语义一路能跑，检索出来的其实是"哪条记忆的中文最多"，所以这种查询会带回一条 `warning`，说明这次排序是任意的（理由见 [DESIGN.md](DESIGN.md#检索的三路信号)）
+- 每条新记忆带一个证据等级，确定性映射成 `confidence`：`user_confirmed=1`、`verified=0.9`、`stated=0.7`、`inferred=0.4`、`disputed=0.2`。它表示**证据有多可靠**，不是它和某次查询有多相关；低于 `0.5` 的注入会明确标成 `VERIFY`，但不参与排序，也不会自己隐藏或删除记忆
 
 ### 两条写入通道的分工
 
@@ -109,6 +110,7 @@ node scripts/test-hooks.mjs D:\UGit\HappyArenaTMR\HappyArena
 | 什么时候落库 | 这一轮结束之后（`stop`）；写入在独立进程里 | 工具调用当场返回结果 |
 | 落成什么 `kind` | 一律 `prompt`，**不进会话注入**，用 `prune --kind prompt` 清理 | 七个类别之一，由 AI 按判据填，进注入白名单 |
 | 判重 | 输入哈希按整轮算（原封重放免费；同一问题换个回答会重新交给模型判断），加上 mem0 抽取路径自己的"有没有新事实" | 输入哈希 + 语义判重（0.92 报错并点名撞上的那条） |
+| 可信度 | 默认 `stated=0.7`，作为 metadata 跟随抽取结果 | AI 选择证据等级、说明 `confidenceReason`；用户明确确认时用 `user_confirmed=1` |
 | 失败会怎样 | 静默且可查：日志一行、`queue/*.failed`、`doctor` 报数；抽取失败回落原文存储 | 直接把错误返回给 AI，它自己决定改哪条或 `force` |
 | 哪些宿主有 | 只有 Cursor（ACP 宿主一个 hook 都不跑） | 任何跑 cursor-agent 的宿主，含 JetBrains 等 ACP 宿主 |
 
@@ -133,9 +135,12 @@ node scripts/test-hooks.mjs D:\UGit\HappyArenaTMR\HappyArena
 
 写记忆时该用哪个 `kind`、注入凭什么挑那几条，见 [DESIGN.md](DESIGN.md#kind一份自己的类别词表)。想手动管理时用 CLI：
 
+`--reason` 只用一句话说明证据来源，不重复记忆正文，最长 240 字符。
+
 ```powershell
 node src/cli.mjs doctor                              # 健康检查（存储 / 嵌入 / 总结模型 / Cursor 接线）
 node src/cli.mjs add "以后提交信息统一用中文" --kind preference
+node src/cli.mjs add "用户明确确认的约定" --kind convention --evidence user_confirmed --reason "User explicitly confirmed it"
 node src/cli.mjs add "一大段啰嗦的话..." --infer      # 交给总结模型拆成若干条事实
 node src/cli.mjs add "这条只在 5.4 期间成立" --expires 2026-12-31   # 到期自动淘汰
 node src/cli.mjs add "本次需求的背景与范围..." --kind context --expires 2026-09-30   # context 不给 --expires 会被拒
@@ -147,7 +152,9 @@ node src/cli.mjs search "build script" --no-rerank   # 只看三路融合排序�
 node src/cli.mjs search "构建脚本"                   # 查询也要用英文：纯中文只有语义一路能跑，会在 stderr 上警告
 node src/cli.mjs list --limit 20                     # 加 --expired 连过期的一起列
 node src/cli.mjs stats
+node src/cli.mjs audit                              # 只读报告元数据不一致、低可信、争议和验证过旧的记忆
 node src/cli.mjs update 1223f031 "改正后的正文"       # 8 位短 id 就够；保留 id 与 createdAt
+node src/cli.mjs update 1223f031 --evidence verified --reason "Confirmed by test X"   # 派生 0.9，服务端自动填写当前 verifiedAt
 node src/cli.mjs update 1223f031 --expires 2026-12-31
 node src/cli.mjs update 1223f031 --clear-expiry
 node src/cli.mjs history 1223f031                    # 这条记忆被改过几次、改之前写的是什么

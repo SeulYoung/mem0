@@ -13,6 +13,7 @@
     "search": "node src/cli.mjs search",
     "list": "node src/cli.mjs list",
     "stats": "node src/cli.mjs stats",
+    "audit": "node src/cli.mjs audit",
     "install-cursor": "node scripts/install-cursor.mjs",
     "uninstall-cursor": "node scripts/install-cursor.mjs --uninstall",
     "install-watchdog": "node scripts/install-watchdog.mjs",

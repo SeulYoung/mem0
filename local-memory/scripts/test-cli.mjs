@@ -49,9 +49,20 @@ const cli = (...args) => run(...args).stdout;
 
 try {
   // A value flag after the text: "convention" must not become part of the body.
-  const added = cli("add", BODY, "--kind", "convention");
+  const added = cli(
+    "add",
+    BODY,
+    "--kind",
+    "convention",
+    "--evidence",
+    "verified",
+    "--reason",
+    "Verified by the CLI integration test.",
+  );
   check("a flag value does not leak into the stored text", added.includes(BODY) && !added.includes(`${BODY} convention`));
   check("the value flag was applied", added.includes("[convention]"), added.split("\n")[0]);
+  check("the evidence level derived confidence", added.includes("evidence=verified confidence=0.90"), added.split("\n")[0]);
+  check("verified evidence received a timestamp", added.includes("verified:"));
 
   // A switch placed before the text: the query must survive it.
   const searched = run("search", "--all", MARKER, "--top", "3");
@@ -76,9 +87,23 @@ try {
   // The listing prints eight-character ids, so those have to be enough to act on.
   const shortId = added.trim().split(/\s+/)[0];
   const corrected = `${MARKER}：改正后的正文，仍然干净结尾。`;
-  const updated = cli("update", shortId, corrected, "--kind", "gotcha");
+  const updated = cli(
+    "update",
+    shortId,
+    corrected,
+    "--kind",
+    "gotcha",
+    "--evidence",
+    "user_confirmed",
+    "--reason",
+    "The test explicitly confirmed the correction.",
+  );
   check("a shortened id from the listing is enough to update", updated.includes(corrected), updated.split("\n")[0]);
   check("the update moved the memory to the new kind", updated.includes("[gotcha]"));
+  check(
+    "the update changed confidence when new evidence was supplied",
+    updated.includes("evidence=user_confirmed confidence=1.00"),
+  );
 
   // The one thing an in-place edit destroys is the previous wording, and mem0's
   // change log is the only copy of it.
@@ -97,10 +122,15 @@ try {
   check("--clear-expiry brings it back", cli("list", "--limit", "50").includes(corrected));
 
   const listed = cli("list", "--limit", "1");
-  check("--limit is honoured", listed.trim().split("\n").length === 2, `${listed.trim().split("\n").length} line(s)`);
+  check("--limit is honoured", (listed.match(/^[0-9a-f]{8}\s/gm) ?? []).length === 1);
 
   const stats = JSON.parse(cli("stats"));
   check("stats reports the local store", stats.dataDir?.includes(".mem0-local") && stats.total >= 1);
+
+  const lowBody = `${MARKER}：这条推断只用于验证可信度审计。`;
+  cli("add", lowBody, "--evidence", "inferred", "--reason", "Inferred only for the audit fixture.");
+  const audit = cli("audit");
+  check("audit reports low-confidence memories without changing them", audit.includes(lowBody) && audit.includes("low="));
 
   // --- the monthly sweep -------------------------------------------------------
   // Last, because it is the one case that deletes the fixture the earlier checks

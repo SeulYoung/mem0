@@ -83,7 +83,14 @@ async function writeViaExtraction(project, text, attributedTo, kind) {
   return memory.add(`请记住：${text}`, {
     userId: config.userId,
     filters: scopeFilters(config, project, "project"),
-    metadata: { project_name: project.name, kind, source: "test:retrieval" },
+    metadata: {
+      project_name: project.name,
+      kind,
+      source: "test:retrieval",
+      evidence: "stated",
+      confidence: 0.7,
+      confidence_reason: "Deterministic extraction fixture.",
+    },
     infer: true,
   });
 }
@@ -253,8 +260,20 @@ try {
   const listed = mine(await listMemories({ project: repoOne, limit: 10, scope: "project" }));
   check(
     "our metadata survives the extraction path",
-    listed.length === 1 && listed[0].kind === "convention" && listed[0].source === "test:retrieval",
-    JSON.stringify(listed.map((r) => ({ project: r.project, kind: r.kind, source: r.source }))),
+    listed.length === 1 &&
+      listed[0].kind === "convention" &&
+      listed[0].source === "test:retrieval" &&
+      listed[0].confidence === 0.7 &&
+      listed[0].evidence === "stated",
+    JSON.stringify(
+      listed.map((r) => ({
+        project: r.project,
+        kind: r.kind,
+        source: r.source,
+        evidence: r.evidence,
+        confidence: r.confidence,
+      })),
+    ),
   );
 
   // mem0 returns attribution outside `metadata`; this layer used to drop it.

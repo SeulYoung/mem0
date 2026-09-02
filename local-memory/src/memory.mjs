@@ -144,6 +144,13 @@ function toRecord(item) {
     kind: metadata.kind ?? null,
     source: metadata.source ?? null,
     sourceHash: metadata.source_hash ?? null,
+    // Evidence strength supplied by the writer, deliberately separate from
+    // mem0's query-dependent retrieval score. Every record follows this shape;
+    // missing values are corruption for `audit` to report, not a legacy state.
+    confidence: metadata.confidence,
+    evidence: metadata.evidence,
+    confidenceReason: metadata.confidence_reason,
+    ...(typeof metadata.verified_at === "string" ? { verifiedAt: metadata.verified_at } : {}),
     // mem0 stamps both itself; we never write a timestamp of our own.
     createdAt: item.createdAt ?? null,
     // Only on a memory that has been rewritten: `createMemory` sets no
@@ -244,6 +251,20 @@ export const KINDS = Object.keys(KIND_GUIDE);
  * in the schema because the CLI writes memories too.
  */
 const EXPIRING_KINDS = new Set(["context"]);
+export const EVIDENCE_CONFIDENCE = Object.freeze({
+  user_confirmed: 1,
+  verified: 0.9,
+  stated: 0.7,
+  inferred: 0.4,
+  disputed: 0.2,
+});
+export const EVIDENCE_LEVELS = Object.keys(EVIDENCE_CONFIDENCE);
+export const DEFAULT_EVIDENCE = "stated";
+export const MAX_CONFIDENCE_REASON_CHARS = 240;
+const VERIFIED_EVIDENCE = new Set(["user_confirmed", "verified"]);
+const VERIFIED_AT_CLOCK_SKEW_MS = 5 * 60 * 1000;
+const ISO_DATE_TIME =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|([+-])(\d{2}):(\d{2}))$/;
 
 function assertExpiry(kind, expiresAt) {
   if (!EXPIRING_KINDS.has(kind) || expiresAt) return;
@@ -260,6 +281,62 @@ function assertExpiry(kind, expiresAt) {
 function assertKind(kind, config) {
   const allowed = [...KINDS, config.capture?.kind ?? "prompt"];
   if (!allowed.includes(kind)) throw new Error(`Unknown kind "${kind}". Use one of: ${allowed.join(", ")}.`);
+}
+
+/**
+ * Confidence is evidence strength, not a retrieval signal. The writer names a
+ * discrete evidence event and this adapter maps it to a number, because mem0
+ * accepts arbitrary metadata and cannot prevent free-form, incomparable values.
+ */
+function assertEvidence(evidence) {
+  if (!EVIDENCE_LEVELS.includes(evidence)) {
+    throw new Error(`Unknown evidence "${evidence}". Use one of: ${EVIDENCE_LEVELS.join(", ")}.`);
+  }
+}
+
+function normalizeConfidenceReason(confidenceReason) {
+  if (confidenceReason === null || confidenceReason === undefined) return null;
+  if (typeof confidenceReason !== "string" || !confidenceReason.trim()) {
+    throw new Error("confidenceReason must be a non-empty string.");
+  }
+  const trimmed = confidenceReason.trim();
+  if ([...trimmed].length > MAX_CONFIDENCE_REASON_CHARS) {
+    throw new Error(`confidenceReason must be at most ${MAX_CONFIDENCE_REASON_CHARS} characters.`);
+  }
+  return trimmed;
+}
+
+function normalizeVerifiedAt(verifiedAt) {
+  if (verifiedAt === null || verifiedAt === undefined) return verifiedAt;
+  if (typeof verifiedAt !== "string") {
+    throw new Error("verifiedAt must be an ISO 8601 date-time string or null.");
+  }
+  const value = verifiedAt.trim();
+  const match = ISO_DATE_TIME.exec(value);
+  if (!match) throw new Error("verifiedAt must be a valid ISO 8601 date-time.");
+
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, , zone, , offsetHour, offsetMinute] =
+    match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1] ?? 0;
+  const invalidClock =
+    Number(hourText) > 23 ||
+    Number(minuteText) > 59 ||
+    Number(secondText) > 59 ||
+    (zone !== "Z" && (Number(offsetHour) > 23 || Number(offsetMinute) > 59));
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth || invalidClock) {
+    throw new Error("verifiedAt contains an invalid calendar date or time.");
+  }
+
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) throw new Error("verifiedAt must be a valid ISO 8601 date-time.");
+  if (timestamp > Date.now() + VERIFIED_AT_CLOCK_SKEW_MS) {
+    throw new Error("verifiedAt cannot be in the future.");
+  }
+  return new Date(timestamp).toISOString();
 }
 
 /**
@@ -326,6 +403,9 @@ export async function addMemory({
   project,
   kind = "note",
   source = "mcp",
+  evidence = DEFAULT_EVIDENCE,
+  confidenceReason = null,
+  verifiedAt = null,
   infer = false,
   expiresAt = null,
   dedupeKey = null,
@@ -338,6 +418,16 @@ export async function addMemory({
   const { memory, config } = await openMemory();
   assertKind(kind, config);
   assertExpiry(kind, expiresAt);
+  assertEvidence(evidence);
+  const normalizedConfidenceReason = normalizeConfidenceReason(confidenceReason);
+  if (evidence !== DEFAULT_EVIDENCE && !normalizedConfidenceReason) {
+    throw new Error(`confidenceReason is required when evidence is "${evidence}".`);
+  }
+  const normalizedVerifiedAt = normalizeVerifiedAt(verifiedAt);
+  if (normalizedVerifiedAt && !VERIFIED_EVIDENCE.has(evidence)) {
+    throw new Error("verifiedAt is only valid for user_confirmed or verified evidence.");
+  }
+  const confidence = EVIDENCE_CONFIDENCE[evidence];
   const filters = scopeFilters(config, project, "project");
   const wantInfer = Boolean(infer) && Boolean(config.llm?.enabled);
 
@@ -400,6 +490,16 @@ export async function addMemory({
       kind,
       source,
       source_hash: inputHash,
+      confidence,
+      evidence,
+      confidence_reason: normalizedConfidenceReason || "Stored without independent verification.",
+      // The service owns the clock. Writers supply evidence, not a timestamp
+      // guess; an explicit value is only for importing a historical event.
+      ...(VERIFIED_EVIDENCE.has(evidence)
+        ? { verified_at: normalizedVerifiedAt ?? new Date().toISOString() }
+        : normalizedVerifiedAt
+          ? { verified_at: normalizedVerifiedAt }
+          : {}),
     },
     // mem0 validates the YYYY-MM-DD shape and stores it as `expiration_date`,
     // then hides the memory from search and getAll once the date has passed.
@@ -430,6 +530,10 @@ export async function addMemory({
       kind: options.metadata.kind,
       source: options.metadata.source,
       sourceHash: options.metadata.source_hash ?? null,
+      confidence: options.metadata.confidence,
+      evidence: options.metadata.evidence,
+      confidenceReason: options.metadata.confidence_reason,
+      verifiedAt: options.metadata.verified_at,
     })) {
       record[key] ??= value;
     }
@@ -626,20 +730,49 @@ export async function resolveMemoryId(id, project) {
  * `agent_id` is fixed at write time. Re-keying a repository is therefore a
  * maintenance job on the payloads themselves — `scripts/rekey-project.mjs`.
  */
-export async function updateMemory({ id, text, kind, expiresAt, project }) {
+export async function updateMemory({
+  id,
+  text,
+  kind,
+  evidence,
+  confidenceReason,
+  verifiedAt,
+  expiresAt,
+  project,
+}) {
   const hasText = text !== undefined && text !== null;
   const hasKind = kind !== undefined && kind !== null;
+  const hasEvidence = evidence !== undefined && evidence !== null;
+  const hasConfidenceReason = confidenceReason !== undefined && confidenceReason !== null;
+  const hasVerifiedAt = verifiedAt !== undefined;
   // `null` is meaningful here — it is how mem0 clears an expiry — so only an
   // absent key counts as "leave it alone".
   const hasExpiry = expiresAt !== undefined;
-  if (!hasText && !hasKind && !hasExpiry) {
-    throw new Error("Nothing to update: provide text, kind or expiresAt.");
+  if (!hasText && !hasKind && !hasEvidence && !hasConfidenceReason && !hasVerifiedAt && !hasExpiry) {
+    throw new Error("Nothing to update: provide text, kind, evidence, confidenceReason, verifiedAt or expiresAt.");
   }
 
   const record = await resolveRecord(id, project);
   const memoryId = record.id;
   const { memory, config } = await openMemory();
   if (hasKind) assertKind(kind, config);
+  const normalizedConfidenceReason = hasConfidenceReason
+    ? normalizeConfidenceReason(confidenceReason)
+    : undefined;
+  if (hasEvidence) {
+    assertEvidence(evidence);
+    if (!normalizedConfidenceReason) {
+      throw new Error("confidenceReason is required when changing evidence.");
+    }
+  }
+  const normalizedVerifiedAt = hasVerifiedAt ? normalizeVerifiedAt(verifiedAt) : undefined;
+  const effectiveEvidence = hasEvidence ? evidence : record.evidence;
+  if (normalizedVerifiedAt && !VERIFIED_EVIDENCE.has(effectiveEvidence)) {
+    throw new Error("verifiedAt is only valid for user_confirmed or verified evidence.");
+  }
+  if (hasVerifiedAt && normalizedVerifiedAt === null) {
+    throw new Error("verifiedAt cannot be cleared directly; downgrade evidence to clear it.");
+  }
   // Judged on the state this edit would leave behind, not on what it supplies:
   // the two ways to end up with an expiring kind and no expiry are promoting a
   // memory into one and clearing the expiry of one already there.
@@ -662,6 +795,18 @@ export async function updateMemory({ id, text, kind, expiresAt, project }) {
     if (clash) throw new Error(`Memory ${clash.id.slice(0, 8)} already says exactly this; delete one of the two instead.`);
   }
   if (hasKind) metadata.kind = kind;
+  if (hasEvidence) {
+    metadata.evidence = evidence;
+    metadata.confidence = EVIDENCE_CONFIDENCE[evidence];
+    if (!VERIFIED_EVIDENCE.has(evidence) && !hasVerifiedAt) metadata.verified_at = null;
+    if (VERIFIED_EVIDENCE.has(evidence) && !hasVerifiedAt) {
+      // Supplying high evidence is the verification event; timestamp it here,
+      // while unrelated edits that omit evidence preserve the previous value.
+      metadata.verified_at = new Date().toISOString();
+    }
+  }
+  if (hasConfidenceReason) metadata.confidence_reason = normalizedConfidenceReason;
+  if (hasVerifiedAt) metadata.verified_at = normalizedVerifiedAt;
 
   await detectDimension();
   await memory.update(memoryId, {
@@ -673,7 +818,7 @@ export async function updateMemory({ id, text, kind, expiresAt, project }) {
 
   log(
     "memory",
-    `update id=${memoryId} text=${hasText} kind=${hasKind ? kind : "-"} expires=${hasExpiry ? (expiresAt ?? "cleared") : "-"}`,
+    `update id=${memoryId} text=${hasText} kind=${hasKind ? kind : "-"} evidence=${hasEvidence ? evidence : "-"} verified=${hasVerifiedAt ? (normalizedVerifiedAt ?? "cleared") : "-"} expires=${hasExpiry ? (expiresAt ?? "cleared") : "-"}`,
   );
   // Read back rather than echo the request: `get` is the only path that shows
   // an expired memory, so it is also the only honest confirmation of one.

@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
+import { MAX_CONFIDENCE_REASON_CHARS } from "../src/memory.mjs";
 import { PATHS } from "../src/paths.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -92,6 +93,12 @@ const storedHere = listing.results.find((record) => record.id === added.ids[0]);
 if (storedHere?.project !== listing.project) {
   throw new Error(`the stored memory is scoped to "${storedHere?.project}", not to this repository (${listing.project})`);
 }
+if (storedHere?.confidence !== 0.7) {
+  throw new Error(`the default confidence is ${storedHere?.confidence}, expected 0.7`);
+}
+if (storedHere?.evidence !== "stated" || !storedHere?.confidenceReason) {
+  throw new Error("the default evidence level or its reason was not stored");
+}
 
 // mem0 compares content hashes only on its extraction path; the verbatim path
 // this tool uses by default has no such check, so the duplicate guard has to
@@ -118,13 +125,68 @@ const before = (await call("memory_list", { limit: 50 })).results.find((record) 
 const shortId = added.ids[0].slice(0, 8);
 const CORRECTED = "MCP 自检记忆：本地记忆层放在 local-memory 目录，提示词通过 stdin 交给模型。";
 
-const updated = await call("memory_update", { id: shortId, text: CORRECTED, kind: "decision" });
+const verificationStartedAt = Date.now();
+const updated = await call("memory_update", {
+  id: shortId,
+  text: CORRECTED,
+  kind: "decision",
+  evidence: "user_confirmed",
+  confidenceReason: "The user explicitly corrected and confirmed this memory.",
+});
 show("memory_update (addressed by shortened id)", updated);
 if (updated.id !== added.ids[0]) throw new Error("an update must keep the memory id");
 if (updated.text !== CORRECTED) throw new Error("the corrected text was not stored");
 if (updated.kind !== "decision") throw new Error("the new kind was not applied");
+if (updated.confidence !== 1) throw new Error("the new confidence was not applied");
+if (updated.evidence !== "user_confirmed") throw new Error("the new evidence level was not applied");
+if (!updated.verifiedAt) throw new Error("user-confirmed evidence must receive a verification timestamp");
+if (Date.parse(updated.verifiedAt) < verificationStartedAt || Date.parse(updated.verifiedAt) > Date.now()) {
+  throw new Error("the default verification timestamp must come from the service clock");
+}
 if (updated.createdAt !== before.createdAt) throw new Error("an update must preserve the original createdAt");
 if (updated.project !== before.project) throw new Error("an update must not drop the project metadata");
+
+const preservedVerification = await call("memory_update", { id: shortId, kind: "decision" });
+if (preservedVerification.verifiedAt !== updated.verifiedAt) {
+  throw new Error("an unrelated update must not refresh the verification timestamp");
+}
+
+const downgraded = await call("memory_update", {
+  id: shortId,
+  evidence: "disputed",
+  confidenceReason: "A contradictory test observation is unresolved.",
+});
+if (downgraded.confidence !== 0.2 || downgraded.evidence !== "disputed") {
+  throw new Error("disputed evidence did not deterministically lower confidence");
+}
+if (downgraded.verifiedAt) throw new Error("downgrading evidence must clear the old verification timestamp");
+
+const restored = await call("memory_update", {
+  id: shortId,
+  evidence: "user_confirmed",
+  confidenceReason: "The test explicitly resolved the contradiction.",
+});
+if (restored.confidence !== 1 || !restored.verifiedAt) {
+  throw new Error("resolved user confirmation did not restore confidence and verification time");
+}
+
+const historical = await call("memory_update", {
+  id: shortId,
+  evidence: "verified",
+  confidenceReason: "Verified by a historical test run.",
+  verifiedAt: "2024-02-29T12:34:56+08:00",
+});
+if (historical.confidence !== 0.9 || historical.verifiedAt !== "2024-02-29T04:34:56.000Z") {
+  throw new Error("a valid leap-day timestamp with an offset was not normalized correctly");
+}
+
+const clearedHighVerification = await client.callTool({
+  name: "memory_update",
+  arguments: { id: shortId, verifiedAt: null },
+});
+if (!clearedHighVerification.isError) {
+  throw new Error("verifiedAt must not be clearable while evidence remains verified");
+}
 
 // The hash guard matches on the input, so it has to follow the edit: the
 // corrected text is now the one that is turned away silently.
@@ -166,6 +228,30 @@ await call("memory_delete", { id: shortLived.ids[0] });
 
 const missing = await client.callTool({ name: "memory_update", arguments: { id: "zzzzzzzz", text: "x" } });
 if (!missing.isError) throw new Error("an id that matches nothing must be reported as an error, not ignored");
+
+const invalidEvidence = await client.callTool({
+  name: "memory_update",
+  arguments: { id: shortId, evidence: "certain", confidenceReason: "Not a supported level." },
+});
+if (!invalidEvidence.isError) throw new Error("an unknown evidence level must be reported as an error");
+
+const overlongReason = await client.callTool({
+  name: "memory_update",
+  arguments: { id: shortId, confidenceReason: "x".repeat(MAX_CONFIDENCE_REASON_CHARS + 1) },
+});
+if (!overlongReason.isError) throw new Error("an overlong confidence reason must be reported as an error");
+
+const invalidCalendarDate = await client.callTool({
+  name: "memory_update",
+  arguments: { id: shortId, verifiedAt: "2026-02-31T00:00:00Z" },
+});
+if (!invalidCalendarDate.isError) throw new Error("a nonexistent calendar date must be reported as an error");
+
+const futureVerification = await client.callTool({
+  name: "memory_update",
+  arguments: { id: shortId, verifiedAt: "2999-01-01T00:00:00Z" },
+});
+if (!futureVerification.isError) throw new Error("a future verification time must be reported as an error");
 
 // --- expiry ------------------------------------------------------------------
 const expired = await call("memory_update", { id: shortId, expiresAt: "2020-01-01" });

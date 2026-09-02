@@ -45,6 +45,9 @@ const record = (name, textChars, kind = "note") => ({
   id: `${name}-0000000000000000000000000000`,
   kind,
   text: name.repeat(Math.max(1, Math.ceil(textChars / name.length))).slice(0, textChars),
+  evidence: "stated",
+  confidence: 0.7,
+  confidenceReason: "Stored without independent verification.",
 });
 
 const idsIn = (lines) => lines.map((line) => line.match(/\(id: ([^)]+)\)/)?.[1] ?? "?");
@@ -183,6 +186,48 @@ check(
 check(
   "the protocol names the searches to run rather than asking for a search",
   MEMORY_PROTOCOL.includes('kind: "convention"') && MEMORY_PROTOCOL.includes('kind: "decision"'),
+);
+check(
+  "the protocol distinguishes evidence confidence from retrieval relevance",
+  MEMORY_PROTOCOL.includes("confidence") &&
+    MEMORY_PROTOCOL.includes("evidence strength") &&
+    MEMORY_PROTOCOL.includes("not search relevance") &&
+    MEMORY_PROTOCOL.includes("Set or change `evidence` only") &&
+    MEMORY_PROTOCOL.includes("does not affect search ranking or deletion"),
+);
+
+const confidenceLine = selectInjectionLines(
+  [{ ...record("trust", 20, "fact"), evidence: "inferred", confidence: 0.4 }],
+  { recent: 1, maxChars: 1000 },
+)[0];
+check(
+  "a low-confidence injected memory says to verify it without changing the short-id shape",
+  confidenceLine.includes("[evidence=inferred VERIFY]") &&
+    !confidenceLine.includes("confidence=") &&
+    idsIn([confidenceLine])[0] === "trust-00",
+  confidenceLine,
+);
+
+const lowReserved = selectInjectionLines(
+  [
+    ...Array.from({ length: 6 }, (_, index) => record(`r${index}`, 40)),
+    { ...record("weak", 40, "convention"), evidence: "disputed", confidence: 0.2 },
+  ],
+  { recent: 5, maxChars: 100000, reserve: ["convention"] },
+);
+check(
+  "low-confidence memories do not take a protected kind slot",
+  !idsIn(lowReserved).includes("weak-000"),
+  idsIn(lowReserved).join(", "),
+);
+const lowRecent = selectInjectionLines(
+  [{ ...record("weak", 40, "convention"), evidence: "disputed", confidence: 0.2 }, record("fresh", 40)],
+  { recent: 2, maxChars: 100000, reserve: ["convention"] },
+);
+check(
+  "the same low-confidence memory can still arrive through recency",
+  idsIn(lowRecent).includes("weak-000"),
+  idsIn(lowRecent).join(", "),
 );
 
 // --- an existing install has to pick the corrected budget up ------------------

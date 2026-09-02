@@ -5,6 +5,7 @@
  */
 import { ensureConfigFile, loadConfig } from "../src/config.mjs";
 import {
+  MAX_CONFIDENCE_REASON_CHARS,
   addMemory,
   deleteMemory,
   detectDimension,
@@ -58,6 +59,32 @@ const refused = async (label, run) => {
 show([
   await refused("unknown kind", () => addMemory({ text: "guard probe", project, kind: "notekind" })),
   await refused("empty text", () => addMemory({ text: "   ", project })),
+  await refused("unknown evidence", () => addMemory({ text: "guard probe", project, evidence: "certain" })),
+  await refused("verified without a reason", () => addMemory({ text: "guard probe", project, evidence: "verified" })),
+  await refused("overlong confidence reason", () =>
+    addMemory({ text: "guard probe", project, confidenceReason: "x".repeat(MAX_CONFIDENCE_REASON_CHARS + 1) }),
+  ),
+  await refused("verification time on unverified evidence", () =>
+    addMemory({ text: "guard probe", project, verifiedAt: "2026-09-02T00:00:00Z" }),
+  ),
+  await refused("nonexistent verification date", () =>
+    addMemory({
+      text: "guard probe",
+      project,
+      evidence: "verified",
+      confidenceReason: "Invalid date guard.",
+      verifiedAt: "2026-02-31T00:00:00Z",
+    }),
+  ),
+  await refused("future verification date", () =>
+    addMemory({
+      text: "guard probe",
+      project,
+      evidence: "verified",
+      confidenceReason: "Future date guard.",
+      verifiedAt: "2999-01-01T00:00:00Z",
+    }),
+  ),
   // `context` is the one kind whose premise is that it stops being true, so an
   // expiry is what makes it storable at all rather than a nicety.
   await refused("context without an expiry", () => addMemory({ text: "guard probe", project, kind: "context" })),

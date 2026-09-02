@@ -4,11 +4,12 @@
  * prune without going through Cursor.
  *
  *   node src/cli.mjs doctor
- *   node src/cli.mjs add "..." [--kind preference] [--expires 2026-12-31] [--force]
+ *   node src/cli.mjs add "..." [--kind preference] [--evidence verified] [--reason "..."] [--force]
  *   node src/cli.mjs search "..." [--all] [--kind convention] [--top 5] [--explain] [--no-rerank]
  *   node src/cli.mjs list [--all] [--limit 20]
  *   node src/cli.mjs stats
- *   node src/cli.mjs update <id> ["new text"] [--kind k] [--expires 2026-12-31] [--clear-expiry]
+ *   node src/cli.mjs audit [--all] [--days 90]
+ *   node src/cli.mjs update <id> ["new text"] [--evidence verified] [--reason "..."]
  *   node src/cli.mjs history <id>
  *   node src/cli.mjs delete <id>
  *   node src/cli.mjs prune --kind prompt --days 30 [--yes]
@@ -31,6 +32,7 @@ import {
   writeJsonAtomic,
 } from "./health.mjs";
 import {
+  EVIDENCE_CONFIDENCE,
   KINDS,
   addMemory,
   deleteMemory,
@@ -110,13 +112,15 @@ function renderRecords(records) {
     // 0.000.
     const reranked = record.rerankScore === undefined ? "" : ` rerank=${record.rerankScore.toExponential(2)}`;
     const from = record.attributedTo ? ` from=${record.attributedTo}` : "";
+    const evidence = record.evidence ?? "INVALID";
+    const confidence = Number.isFinite(record.confidence) ? record.confidence.toFixed(2) : "INVALID";
     const expiry = record.expiresAt ? ` expires=${record.expiresAt}` : "";
     // Present only on a memory that has been rewritten. Worth a column of its
     // own because an edit keeps the original `createdAt`, so this is the only
     // thing that says the text is newer than the memory looks.
     const edited = record.updatedAt ? ` edited=${record.updatedAt.slice(0, 10)}` : "";
     out(
-      `${record.id.slice(0, 8)}  [${record.kind ?? "note"}] ${record.projectName ?? "-"}${score}${reranked}${from}${expiry}${edited}\n    ${record.text}`,
+      `${record.id.slice(0, 8)}  [${record.kind ?? "note"}] ${record.projectName ?? "-"}${score}${reranked} evidence=${evidence} confidence=${confidence}${from}${expiry}${edited}\n    ${record.text}`,
     );
     // mem0 fuses semantic + BM25 keyword + entity boost; --explain shows which fired.
     if (record.scoreDetails) {
@@ -125,6 +129,48 @@ function renderRecords(records) {
         .map(([key, value]) => `${key}=${value.toFixed(3)}`);
       out(`    signals: ${parts.join("  ")}`);
     }
+    if (record.confidenceReason) out(`    evidence: ${record.confidenceReason}`);
+    if (record.verifiedAt) out(`    verified: ${record.verifiedAt}`);
+  }
+}
+
+async function audit() {
+  const days = Number(flag("days", 90));
+  if (!Number.isFinite(days) || days < 0) throw new Error("--days must be a non-negative number.");
+  const records = await listMemories({ project, limit: SCAN_ALL, scope });
+  const cutoff = Date.now() - days * DAY_MS;
+  const inconsistent = records.filter(
+    (record) =>
+      EVIDENCE_CONFIDENCE[record.evidence] === undefined ||
+      record.confidence !== EVIDENCE_CONFIDENCE[record.evidence] ||
+      !record.confidenceReason,
+  );
+  const low = records.filter((record) => typeof record.confidence === "number" && record.confidence < 0.5);
+  const disputed = records.filter((record) => record.evidence === "disputed");
+  const highWithoutVerification = records.filter(
+    (record) => typeof record.confidence === "number" && record.confidence >= 0.9 && !record.verifiedAt,
+  );
+  const staleVerification = records.filter(
+    (record) =>
+      typeof record.confidence === "number" &&
+      record.confidence >= 0.9 &&
+      record.verifiedAt &&
+      Date.parse(record.verifiedAt) < cutoff,
+  );
+
+  out(
+    `confidence audit: scope=${scope} total=${records.length} inconsistent=${inconsistent.length} low=${low.length} disputed=${disputed.length} high_unverified=${highWithoutVerification.length} stale_verification=${staleVerification.length}`,
+  );
+  for (const [label, matches] of [
+    ["inconsistent evidence metadata", inconsistent],
+    ["low confidence — verify before use", low],
+    ["high confidence without verifiedAt", highWithoutVerification],
+    [`verification older than ${days} days`, staleVerification],
+  ]) {
+    if (matches.length === 0) continue;
+    out(`\n${label} (${matches.length}):`);
+    renderRecords(matches.slice(0, 20));
+    if (matches.length > 20) out(`    ... ${matches.length - 20} more`);
   }
 }
 
@@ -350,7 +396,7 @@ switch (command) {
     const text = positional.join(" ");
     if (!text) {
       throw new Error(
-        'Usage: node src/cli.mjs add "the memory text" [--kind preference] [--infer] [--expires YYYY-MM-DD] [--force]',
+        'Usage: node src/cli.mjs add "the memory text" [--kind preference] [--evidence verified] [--reason "..."] [--verified-at ISO_DATE] [--infer] [--expires YYYY-MM-DD] [--force]',
       );
     }
     const stored = await addMemory({
@@ -358,6 +404,9 @@ switch (command) {
       project,
       kind: flag("kind", "note"),
       source: "cli",
+      evidence: flag("evidence", undefined),
+      confidenceReason: flag("reason", null),
+      verifiedAt: flag("verified-at", null),
       infer: Boolean(flag("infer", false)),
       expiresAt: flag("expires", null),
       dedupe: !flag("force", false),
@@ -412,15 +461,30 @@ switch (command) {
   case "stats":
     out(await statsMemories());
     break;
+  case "audit":
+    await audit();
+    break;
   case "update": {
     const id = positional[0];
     // Everything after the id is the replacement text, so quoting it is optional.
     const text = positional.slice(1).join(" ");
     const kind = flag("kind", undefined);
+    const evidence = flag("evidence", undefined);
+    const reason = flag("reason", undefined);
+    const verifiedAt = flag("verified-at", undefined);
     const expires = flag("expires", undefined);
-    if (!id || (!text && !kind && !expires && !flag("clear-expiry", false))) {
+    if (
+      !id ||
+      (!text &&
+        !kind &&
+        evidence === undefined &&
+        reason === undefined &&
+        verifiedAt === undefined &&
+        !expires &&
+        !flag("clear-expiry", false))
+    ) {
       throw new Error(
-        'Usage: node src/cli.mjs update <id> ["new text"] [--kind k] [--expires YYYY-MM-DD] [--clear-expiry]',
+        'Usage: node src/cli.mjs update <id> ["new text"] [--kind k] [--evidence verified] [--reason "..."] [--verified-at ISO_DATE] [--expires YYYY-MM-DD] [--clear-expiry]',
       );
     }
     renderRecords([
@@ -429,6 +493,9 @@ switch (command) {
         project,
         ...(text ? { text } : {}),
         ...(kind ? { kind } : {}),
+        ...(evidence === undefined ? {} : { evidence }),
+        ...(reason === undefined ? {} : { confidenceReason: reason }),
+        ...(verifiedAt === undefined ? {} : { verifiedAt }),
         ...(flag("clear-expiry", false) ? { expiresAt: null } : expires ? { expiresAt: expires } : {}),
       }),
     ]);
@@ -487,7 +554,7 @@ switch (command) {
         "Local memory CLI",
         "",
         "  doctor                          health check of store, embedder, model and Cursor wiring",
-        '  add "text" [--kind k] [--infer] [--expires YYYY-MM-DD] [--force]',
+        '  add "text" [--kind k] [--evidence level] [--reason text] [--verified-at ISO] [--infer] [--expires YYYY-MM-DD] [--force]',
         "                                  store a memory (--infer distils it through the model,",
         "                                  --force stores it despite a near-identical existing one)",
         `                                  kinds: ${KINDS.join(" | ")} — see DESIGN.md for what each one means`,
@@ -496,8 +563,10 @@ switch (command) {
         "                                  --explain shows each retrieval signal",
         "  list [--all] [--limit n] [--expired]   newest memories first; --expired also shows expired ones",
         "  stats                           counts by repository and kind",
-        '  update <id> ["new text"] [--kind k] [--expires YYYY-MM-DD] [--clear-expiry]',
+        "  audit [--all] [--days 90]       report inconsistent, low-confidence, disputed and stale verification records",
+        '  update <id> ["new text"] [--kind k] [--evidence level] [--reason text] [--verified-at ISO] [--expires YYYY-MM-DD] [--clear-expiry]',
         "                                  correct a memory in place, keeping its id and original date",
+        "                                  downgrading evidence clears its verification time",
         "  history <id>                    every change mem0 recorded for one memory, newest first,",
         "                                  including the text an update replaced",
         "  delete <id>                     delete one memory owned by this repository",

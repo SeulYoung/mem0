@@ -6,7 +6,14 @@
  * Kept out of `mcp-server.mjs` so `scripts/test-prompts.mjs` can import the
  * wording without starting a server.
  */
-import { KINDS, KIND_GUIDE } from "./memory.mjs";
+import {
+  DEFAULT_EVIDENCE,
+  EVIDENCE_CONFIDENCE,
+  EVIDENCE_LEVELS,
+  KINDS,
+  KIND_GUIDE,
+  MAX_CONFIDENCE_REASON_CHARS,
+} from "./memory.mjs";
 import { ENGLISH_ONLY, KEEP_IDENTIFIERS, MEMORY_LENGTH, SPLIT_NOT_COMPRESS } from "./wording.mjs";
 
 const SCOPE_READ = {
@@ -35,6 +42,21 @@ const MEMORY_ID = {
   description:
     'Memory id from memory_search, memory_list, or the list injected at the start of this session. The shortened eight-character form shown there is enough. Must name a memory belonging to this repository — memories owned by another repository are readable with scope "all" but can only be changed from the repository that owns them.',
 };
+
+const EVIDENCE_DESCRIPTION =
+  `Evidence basis (default "${DEFAULT_EVIDENCE}"), mapped to confidence: ${EVIDENCE_LEVELS.map((level) => `${level}=${EVIDENCE_CONFIDENCE[level]}`).join(", ")}. ` +
+  "user_confirmed: explicit user confirmation or request; verified: direct code, test, configuration or tool evidence; stated: unchecked explicit claim; inferred: reasoning; disputed: unresolved contradiction.";
+
+const EVIDENCE = {
+  type: "string",
+  enum: EVIDENCE_LEVELS,
+  description: EVIDENCE_DESCRIPTION,
+};
+
+const VERIFIED_AT_DESCRIPTION =
+  "ISO 8601 time when verified or user_confirmed evidence was established. Only valid for those levels.";
+const HISTORICAL_VERIFIED_AT =
+  "Supply only a known historical time.";
 
 /**
  * Built from config rather than frozen, because one description quotes a
@@ -86,6 +108,18 @@ export function memoryTools(config) {
             description: `The memory, as one self-contained English statement opening with the topic it is about — English even when the conversation is in another language. ${ENGLISH_ONLY} ${KEEP_IDENTIFIERS}`,
           },
           kind: { type: "string", enum: KINDS, description: KIND_DESCRIPTION },
+          evidence: EVIDENCE,
+          confidenceReason: {
+            type: "string",
+            maxLength: MAX_CONFIDENCE_REASON_CHARS,
+            description:
+              `One short sentence (max ${MAX_CONFIDENCE_REASON_CHARS} characters) explaining why this evidence level applies. Required unless evidence is "stated"; name the evidence without repeating the memory.`,
+          },
+          verifiedAt: {
+            type: "string",
+            format: "date-time",
+            description: `${VERIFIED_AT_DESCRIPTION} Normally omit: the server timestamps high evidence now. ${HISTORICAL_VERIFIED_AT}`,
+          },
           distil: {
             type: "boolean",
             description:
@@ -142,6 +176,22 @@ export function memoryTools(config) {
             type: "string",
             enum: KINDS,
             description: "Move the memory to a different category, judged by the same tests memory_add lists.",
+          },
+          evidence: {
+            ...EVIDENCE,
+            description:
+              "Replace evidence and its derived confidence using memory_add's levels. Requires confidenceReason and a real evidence event; search hits, repetition and age do not count.",
+          },
+          confidenceReason: {
+            type: "string",
+            maxLength: MAX_CONFIDENCE_REASON_CHARS,
+            description:
+              `One short sentence (max ${MAX_CONFIDENCE_REASON_CHARS} characters) explaining why the current evidence level applies. Required when changing evidence; may be supplied alone to clarify it.`,
+          },
+          verifiedAt: {
+            type: "string",
+            format: "date-time",
+            description: `${VERIFIED_AT_DESCRIPTION} When setting high evidence, omit to use server time; on other updates omission preserves the existing time. ${HISTORICAL_VERIFIED_AT} Downgrading evidence clears it automatically.`,
           },
           expiresAt: {
             type: ["string", "null"],
