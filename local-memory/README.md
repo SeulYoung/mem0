@@ -275,10 +275,10 @@ node src/cli.mjs list --limit 5                 # 验证：能列出来就说明
 
 ```powershell
 npm install mem0ai@latest      # 或指定版本
-node scripts/smoke-test.mjs    # 验证；异常就 npm install mem0ai@3.1.6 回退
+node scripts/smoke-test.mjs    # 验证；异常就 npm install mem0ai@3.1.7 回退
 ```
 
-`package.json` 里锁的是 `mem0ai@^3.1.6`；跨大版本升级前先看上游 migration guide，尤其注意存储格式与 `search`/`getAll` 的参数约定，以及 [DESIGN.md 的「上游 mem0 的已知问题」](DESIGN.md#上游-mem0-的已知问题)那张表里还成不成立。
+`package.json` 里锁的是 `mem0ai@^3.1.8`；跨大版本升级前先看上游 migration guide，尤其注意存储格式与 `search`/`getAll` 的参数约定，以及 [DESIGN.md 的「上游 mem0 的已知问题」](DESIGN.md#上游-mem0-的已知问题)那张表里还成不成立。
 
 ⚠️ **升级 `fastembed` 或 `@huggingface/transformers` 之后，先确认 `overrides` 里的 `onnxruntime-node` 仍然对两者都成立**（两个原生 ONNX 运行时共存会让进程直接崩掉，没有任何 JavaScript 异常，原因见 [DESIGN.md 的「第四路：重排」](DESIGN.md#第四路重排)末尾）：
 

@@ -39,7 +39,7 @@
     "@modelcontextprotocol/sdk": "^1.25.4",
     "better-sqlite3": "^12.6.2",
     "fastembed": "^2.1.0",
-    "mem0ai": "^3.1.7"
+    "mem0ai": "^3.1.8"
   },
   "overrides": {
     "onnxruntime-node": "1.24.3"

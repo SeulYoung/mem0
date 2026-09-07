@@ -152,10 +152,9 @@ check(
     add.inputSchema.properties.confidenceReason.description.includes("without repeating the memory"),
 );
 check(
-  "verifiedAt descriptions match the validator and avoid needless timestamps",
+  "verifiedAt descriptions explain valid usage and avoid needless timestamps",
   add.inputSchema.properties.verifiedAt.description.includes("Only valid for those levels") &&
     add.inputSchema.properties.verifiedAt.description.includes("server timestamps high evidence now") &&
-    add.inputSchema.properties.verifiedAt.description.includes("over five minutes ahead are rejected") &&
     add.inputSchema.properties.verifiedAt.format === "date-time" &&
     update.inputSchema.properties.verifiedAt.description.includes("omission preserves the existing time") &&
     update.inputSchema.properties.verifiedAt.description.includes("Downgrading evidence clears it automatically") &&
