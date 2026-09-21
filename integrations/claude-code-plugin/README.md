@@ -4,6 +4,8 @@ Persistent cross-session memory for Claude Code, plus a Sonnet sidekick agent fo
 
 Claude Code forgets everything between sessions. This plugin fixes that: hooks capture session details locally, a background worker turns them into Mem0 memories, and Claude automatically gets the relevant ones back at the start of later sessions.
 
+Current bundle version: `0.3.1`.
+
 ## Prerequisites
 
 - Python 3.10+ and Git.
@@ -34,29 +36,34 @@ To remove:
 claude plugin uninstall mem0@mem0-plugins
 ```
 
-For local development, load the current checkout directly:
+For local development, verify and load the self-contained plugin directory:
 
 ```bash
-claude --plugin-dir .
+python3 integrations/agent-plugin-core/build/build.py claude-code --kind native --check
+claude --plugin-dir integrations/claude-code-plugin
 ```
 
 ## How it works
 
 ### Memory
 
-1. **Capture.** Hooks save the main agent's activity locally: user messages, Claude's answers, changed file paths, and short test/build results. No model calls, no blocking. Sidekick output is excluded.
+1. **Capture.** Hooks save the main agent's activity locally: user messages, Claude's answers, changed file paths, and short test/build results. Capture does not call a model. Sidekick assignments and completed responses are recorded separately as supporting evidence.
 
-2. **Flush.** After every five completed exchanges, a detached background worker sends that batch to Mem0. Large exchanges flush sooner. Ending or compacting the session flushes anything remaining. If idle, an auto-flush runs after five minutes (configurable with `MEM0_CODE_IDLE_FLUSH_SECONDS`). The worker survives Claude Code exiting.
+2. **Flush.** After every five completed exchanges, a detached background worker sends that batch to Mem0. Large exchanges flush sooner. Ending or compacting the session flushes anything remaining. The session-end worker sends the conversation already collected by hooks without recording the final answer again. If idle, an auto-flush runs after five minutes (configurable with `MEM0_CODE_IDLE_FLUSH_SECONDS`). The worker survives Claude Code exiting.
 
-3. **Extract.** Each flush sends a single `add` call with `agent_id` (the project identity), `user_id` (you), `app_id` (the repository), and `run_id` (the session). Mem0 classifies each extracted memory as either:
+3. **Extract.** Each flush sends one or more `add` calls with `agent_id` (the project identity), `user_id` (you), `app_id` (the repository), and `run_id` (the session). Mem0 classifies each extracted memory as either:
    - **Shared project memory** (`agent_id`): one namespace per repo, scoped by `app_id`. Stores conventions, decisions, constraints, working commands, and failed commands with their fixes. Everyone on the repo reads and writes the same pool. Never carries a `user_id`. Directory information is stored in metadata for directory-scoped searches.
    - **Personal memory** (`user_id`): your preferred tools, style, habits, and anything you asked to be remembered. Scoped to the repo by `app_id`. Private to you.
 
-4. **Recall.** On the next session's first prompt, the plugin searches automatically and supplies up to five relevant memories. No model is called to write the query.
+4. **Recall.** On the next session's first prompt, if it has at least 20 characters, the plugin searches automatically and supplies up to five relevant memories. No model is called to write the query.
+
+Captured prompts and responses retain their full text after secret redaction. Oversized extraction input is split across requests without discarding message text. Search results and tool evidence still have separate size limits.
 
 After that first search, Claude can call `search_memories` with a specific question, and you can run `/mem0:search` yourself. Explicit searches return up to 3 results by default (configurable to 20), capped at 4,000 characters.
 
 ### Sonnet sidekick agent
+
+Sidekick is available only in this plugin. The shared core handles memory and subagent tracking.
 
 `mem0:sidekick` is a Sonnet coding agent that runs in a separate Git worktree. It can investigate, implement, test, debug, or review something instead of the main (Opus/Fable) session doing the same work, reducing cost when the main agent doesn't need to repeat it.
 
@@ -87,7 +94,7 @@ By default the worktree branches from the repo's default branch. Set `worktree.b
 
 | Command | What it does |
 | --- | --- |
-| `/mem0:search` | Search memories from earlier sessions. Accepts `--top-k <n>`, `--category <name>`, and `--scope <repo\|dir\|mine>`. |
+| `/mem0:search` | Search memories from earlier sessions. Accepts `--top-k <n>`, `--category <name>`, `--scope <repo\|dir\|mine>`, and `--run-id <session-id>`. |
 | `/mem0:status` | Check config, capture state, pending flushes, and API key validity. |
 | `/mem0:forget` | Delete your memories for this repo (shared project memory stays unless you pass `--include-project-memory`). |
 | `/mem0:pause` | Pause memory capture. |
@@ -104,7 +111,11 @@ Categories for `--category`: `project_knowledge`, `decisions_and_constraints`, `
 | `dir` | Project memory from the current directory (and children), plus your preferences |
 | `mine` | Your personal preferences only |
 
-Set the default with the `search_scope` setting or `MEM0_CODE_SEARCH_SCOPE`. Pass `--run-id <session-id>` to see only what one specific session recorded.
+Set the default with the `search_scope` setting or `MEM0_CODE_SEARCH_SCOPE`. Pass optional `run_id` to `search_memories` (or `--run-id` to `/mem0:search`) with any scope to search memories saved in that session. Omit it to search across sessions. This filters the returned memories; it does not identify the session making the request. Use a known session ID.
+
+New Git repository memories use a hash of the remote identity in `agent_id`. Searches also include the previous unhashed ID under the same repository `app_id`, so shared memories remain available after upgrading. Older IDs retain their original limitation: matching owner/repository names on different Git hosts share that legacy namespace. Local folders keep their path-based namespaces.
+
+Explicit shared-memory deletion with `--include-project-memory` covers both repository IDs. Default deletion preserves shared memories.
 
 ## Settings
 
@@ -125,13 +136,23 @@ Local data lives in `${CLAUDE_PLUGIN_DATA}`:
 - `pending/`: sessions waiting to be sent to Mem0 (retried after interruption)
 - `flush-worker.log`: whether memory creation succeeded
 - `plugin-errors.log`: hook errors (no credentials)
-- `telemetry.jsonl` / `telemetry-identity.json`: anonymous usage events
+- `telemetry.jsonl` / `telemetry-identity.json`: usage events and the id they are sent under
+- `telemetry-salt`: random per-install salt for the repo and session hashes
+- `install-state.json`: records that install has been counted once on this machine
 
-Mem0 receives each block of user messages, Claude's answers, the sidekick's answer, and changed file paths. Complete files and general tool output stay on your machine. Values that look like credentials are redacted before anything is sent.
+Mem0 receives captured user messages, Claude's answers, sidekick assignments and completed responses, and changed file paths. When a failed command is recorded, extraction can also include bounded command details and results. Complete files and general tool output stay on your machine. Values that look like credentials are redacted before anything is sent.
 
 ## Telemetry
 
-Anonymous usage events (which hook ran, timing, result counts, failure types) so Mem0 can identify what's used and what's breaking. Repo and session IDs are hashed before leaving your machine. Prompts, memory text, file paths, tool output, and API keys are never sent.
+Usage events (which hook ran, timing, result counts, failure types) so Mem0 can identify what's used and what's breaking.
+
+**These events are not anonymous.** When an API key is configured — which installing the plugin requires — events are sent under your Mem0 account email, the same way the Python SDK and the CLI attribute theirs. Without a key they are sent under a random per-machine id.
+
+What each event carries: the event name, the plugin version, the harness it ran in, your OS and Python version, and per-event properties describing what happened — timings, counts, coarse outcome and failure labels, and which model was configured. Repository and session identifiers are hashed with a random salt generated on your machine, so they cannot be linked back to a repository name or path.
+
+Rather than restate a list that drifts, the exact set is enforced in code: `telemetry.record` filters every property through a denylist of sensitive keys and redacts credential-shaped values. See `_PRIVATE_KEYS` in `core/telemetry.py`.
+
+Prompts, memory text, queries, file paths, repository names, and API keys are never sent.
 
 Turn it off:
 
@@ -181,10 +202,10 @@ Breaking update. Memories carry over, most local config does not.
 
 ## Development checks
 
-Run from `integrations/claude-code-plugin/`:
+Run from the repository root:
 
 ```bash
-python3 -m pytest tests -q
-python3 -m ruff check .
-claude plugin validate --strict .
+python3 -m pytest integrations/claude-code-plugin/tests -q --ignore=integrations/claude-code-plugin/tests/integration
+python3 -m ruff check integrations/agent-plugin-core/python integrations/claude-code-plugin
+claude plugin validate --strict integrations/claude-code-plugin
 ```

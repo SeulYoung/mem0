@@ -41,6 +41,7 @@
                     "pages": [
                       "platform/quickstart",
                       "platform/overview",
+                      "platform/copilot",
                       "platform/agent-signup",
                       "vibecoding",
                       "platform/cli",
@@ -373,6 +374,7 @@
                       "integrations/claude-ai",
                       "integrations/cursor",
                       "integrations/codex",
+                      "integrations/kimi",
                       "integrations/opencode",
                       "integrations/antigravity"
                     ]
@@ -442,7 +444,8 @@
                       "cookbooks/integrations/mastra-agent",
                       "cookbooks/integrations/healthcare-google-adk",
                       "cookbooks/integrations/aws-bedrock",
-                      "cookbooks/integrations/tavily-search"
+                      "cookbooks/integrations/tavily-search",
+                      "cookbooks/integrations/supabase"
                     ]
                   },
                   {

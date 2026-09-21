@@ -5,6 +5,8 @@ description: "Persistent cross-session memory for Claude Code. Install once, mem
 
 Claude Code forgets everything between sessions. This plugin fixes that. Install it, work normally, and Claude remembers what happened across sessions.
 
+<Info>Current plugin version: `0.3.1`.</Info>
+
 ## Prerequisites
 
 1. A Mem0 Platform account and API key (starts with `m0-`):
@@ -40,14 +42,14 @@ claude plugin uninstall mem0@mem0-plugins      # uninstall the plugin (keeps the
 
 Once installed, memory works without any action from you:
 
-- **Capture** happens in the background as you work. Hooks save user messages, Claude's answers, changed files, and test/build results locally. Nothing calls a model or slows your session.
-- **Recall** happens automatically before Claude's first response in a new session. The plugin searches your memories with your prompt and injects up to five relevant ones.
+- **Capture** happens in the background as you work. Hooks save user messages, Claude's answers, changed files, and test/build results locally. Capture records evidence locally; memory extraction runs through Mem0 in a background worker.
+- **Recall** happens automatically before Claude's first response in a new session. If the first prompt has at least 20 characters, the plugin searches with that prompt and injects up to five relevant memories. For shorter prompts or later questions, use explicit search.
 
 ### Commands
 
 | Command | What it does |
 | --- | --- |
-| `/mem0:search` | Search memories from earlier sessions. Supports `--top-k <n>`, `--category <name>`, and `--scope <repo\|dir\|mine>`. |
+| `/mem0:search` | Search memories from earlier sessions. Supports `--top-k <n>`, `--category <name>`, `--scope <repo\|dir\|mine>`, and `--run-id <session-id>`. |
 | `/mem0:status` | Check if memory is working: config, capture state, pending flushes, API key validity. |
 | `/mem0:forget` | Delete your memories for this repo (shared project memory stays unless you pass `--include-project-memory`). |
 | `/mem0:pause` | Pause memory capture. |
@@ -58,9 +60,11 @@ Categories for `--category`: `project_knowledge`, `decisions_and_constraints`, `
 
 ### Search tool
 
-After the automatic first-prompt search, Claude can also call `search_memories` with a specific question, and you can run `/mem0:search` yourself. Explicit searches return up to 3 results by default (configurable to 20). All results are capped at 4,000 characters.
+After the automatic first-prompt search, Claude can also call `search_memories` with a specific question, and you can run `/mem0:search` yourself. Explicit searches return up to 3 results by default (configurable to 20). The combined search output is capped at 4,000 characters by default, configurable with `max_context_chars`. This recall limit does not truncate captured messages sent for extraction.
 
 ### Sidekick agent
+
+Sidekick is available only in Claude Code.
 
 `mem0:sidekick` is a Sonnet coding agent that runs in a separate Git worktree. Use it to offload investigation, implementation, testing, or review without burning main-session context.
 
@@ -71,21 +75,23 @@ Review its result and send any corrections back to the same sidekick.
 
 Changes stay in the sidekick's worktree until the main agent reviews and copies them over. By default the worktree branches from the repo's default branch. Set `worktree.baseRef` to `"head"` in your Claude settings to branch from the current commit instead. Uncommitted changes are not copied into the sidekick's worktree.
 
+At startup, Sidekick receives the memories already recalled for its parent session. It can also call the Mem0 search tool for its assigned task. Start and completion hooks track its work locally; completing a Sidekick task does not independently send a memory-extraction request. Sidekick returns its result, validation, and a local commit when it changes files, so the main agent can review the work before incorporating it.
+
 ## How it works
 
 The plugin follows a simple cycle: capture during a session, extract memories in the background, recall in the next session.
 
 <Frame>
-  <img src="/images/plugin-sequence.svg" alt="Sequence diagram: session start triggers first-prompt search, hooks capture activity during the session, a background worker extracts memories after every five exchanges or on idle/exit, and the next session recalls them." />
+  <img src="/images/plugin-sequence.svg" alt="Sequence diagram: the first user prompt triggers search, hooks capture activity during the session, a background worker extracts memories after every five exchanges or on idle/exit, and the next session recalls them." />
 </Frame>
 
 **Step by step:**
 
-1. **Capture.** Hooks save the main agent's activity locally: user messages, Claude's answers, changed files, and short test/build results. Subagent (sidekick) output is excluded. No model calls, no blocking.
+1. **Capture.** Hooks save the main agent's activity locally: user messages, Claude's answers, changed files, and short test/build results. Direct Sidekick lifecycle records stay local. Subagent results included in the main transcript can provide supporting evidence for extraction; the main agent's final response establishes the outcome. Capture does not call a model.
 
 2. **Flush.** After every five completed exchanges, a detached background worker sends that batch to Mem0. Large exchanges flush sooner. Ending or compacting the session flushes anything remaining. If the session sits idle, an auto-flush runs after five minutes (configurable with `MEM0_CODE_IDLE_FLUSH_SECONDS`). The timer resets on each new exchange. The worker survives Claude Code exiting.
 
-3. **Extract.** Each flush sends a single `add` call with `agent_id` (the project identity), `user_id` (you), `app_id` (the repository), and `run_id` (the session). Mem0 classifies each extracted memory as shared project knowledge or a personal preference.
+3. **Extract.** Each flush sends `add` calls with `agent_id` (the project identity), `user_id` (you), `app_id` (the repository), and `run_id` (the session). Prompts and responses are redacted without a character cutoff. Large conversations are split across requests without dropping message text. Mem0 classifies each extracted memory as shared project knowledge or a personal preference.
 
 4. **Recall.** On the next session's first prompt, the plugin searches automatically and supplies up to five relevant memories. No model is called to write the query.
 
@@ -110,9 +116,13 @@ Every memory carries identifiers showing where it came from:
 | Identifier | What it is | Example |
 | --- | --- | --- |
 | `user_id` | You (personal memory only) | Your Mem0 user ID |
-| `agent_id` | The project identity (shared memory only) | `acme-payments-api` |
+| `agent_id` | The project identity (shared memory only) | `acme-payments-api-<hash>` |
 | `app_id` | The repository (scopes both lanes) | `acme-payments-api` |
 | `run_id` | The Claude Code session | The session ID |
+
+New Git repository memories use an `agent_id` with a hash of the Git remote identity so matching owner/repository names on different hosts stay separate. Searches also include the previous unhashed `agent_id`, scoped by the repository's `app_id`, so existing shared memories remain available after upgrading. Those older memories retain their original namespace, which did not distinguish Git hosts. Local folders continue using a hash of their path.
+
+Explicitly forgetting shared project memory with `--include-project-memory` covers both repository IDs. Without that option, shared memories are preserved.
 
 A search returns the union of shared project memory and your personal preferences. The scope narrows the project part:
 
@@ -124,7 +134,7 @@ A search returns the union of shared project memory and your personal preference
 
 The `dir` scope is hierarchical: a parent directory sees everything in its children, but a child never sees the parent's memories.
 
-Pass `--run-id <session-id>` to see only what one specific session recorded. Set the default scope with the `search_scope` setting or `MEM0_CODE_SEARCH_SCOPE` env var.
+The search tool accepts an optional `run_id` with every scope (`repo`, `dir`, and `mine`); `/mem0:search` exposes it as `--run-id session-id`. It restricts both shared and personal results to memories saved in that coding-agent session. Omit it to search across sessions. This is a memory filter, not a label for the session making the request; automatically filtering by the current session would hide earlier-session memories. Each memory update still records the session's `run_id`. Set the default scope with the `search_scope` setting or `MEM0_CODE_SEARCH_SCOPE` env var.
 
 ## Settings
 
@@ -145,7 +155,7 @@ Breaking update. Your memories carry over, most local config does not.
 - **Commands replaced.** Old commands replaced by `/mem0:search`, `/mem0:status`, `/mem0:forget`, `/mem0:pause`, `/mem0:resume`, `/mem0:remember`.
 - **MCP server replaced.** Nine read/write tools replaced by the single read-only `search_memories` tool.
 - **Local config ignored.** `~/.mem0/settings.json` and per-project `mem0.md` files are no longer read.
-- **Old memories searchable, not by category.** Normal search finds pre-upgrade memories, but category filters do not.
+- **Old memories remain searchable.** Pre-upgrade memories may use different categories. Omit category filters if an older memory is missing from the results.
 
 ```bash
 claude plugin marketplace update mem0-plugins
@@ -161,6 +171,36 @@ claude plugin update mem0@mem0-plugins --scope user
 | No memory after ending a session | Extraction runs in the background. Wait a moment, then search again. |
 | Sidekick won't start | Must be in a Git repo. Check that your Claude Code version supports plugin agents and worktrees. |
 | Remove the plugin | `claude plugin uninstall mem0@mem0-plugins` |
+
+## Telemetry
+
+The plugin sends usage events (which hook ran, timing, result counts, failure
+types) so Mem0 can see what's used and what's breaking.
+
+These events are **not anonymous**. When an API key is configured, which
+installing the plugin requires, they are sent under your Mem0 account email,
+the same way the Python SDK and the CLI attribute theirs. Without a key they
+are sent under a random per-machine id.
+
+Each event carries the event name, the plugin version, the harness it ran in,
+your OS and Python version, and per-event properties describing what happened:
+timings, counts, coarse outcome and failure labels, and which model was
+configured. Repository and session identifiers are hashed with a random salt
+generated on your machine, so they cannot be linked back to a repository name
+or path.
+
+The exact set is enforced in code rather than by this list: every property is
+filtered through a denylist of sensitive keys and credential-shaped values are
+redacted before anything is sent.
+
+Prompts, memory text, queries, file paths, repository names, and API keys are
+never sent.
+
+Turn it off:
+
+```bash
+export MEM0_TELEMETRY=false
+```
 
 <CardGroup cols={2}>
   <Card title="Mem0 MCP Setup" icon="puzzle-piece" href="/platform/mem0-mcp">
