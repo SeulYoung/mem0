@@ -69,6 +69,12 @@ export function memoryTools(config) {
       name: "memory_search",
       description:
         "Search the local memory store for things learned in earlier sessions (user preferences, project conventions, past decisions, gotchas). Call this before answering questions that depend on prior context, and whenever the user refers to something previously discussed.",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
       inputSchema: {
         type: "object",
         properties: {
@@ -100,6 +106,12 @@ export function memoryTools(config) {
     {
       name: "memory_add",
       description: `Store one durable fact worth remembering in future sessions: a user preference, a project convention, an architectural decision and its reason, or a non-obvious pitfall. ${MEMORY_LENGTH} ${SPLIT_NOT_COMPRESS} Do not store transient task state, secrets, or anything already obvious from the code.`,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
       inputSchema: {
         type: "object",
         properties: {
@@ -143,6 +155,12 @@ export function memoryTools(config) {
       name: "memory_list",
       description:
         "List the most recently stored memories, newest first. Useful for reviewing or cleaning up what was captured.",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
       inputSchema: {
         type: "object",
         properties: {
@@ -160,6 +178,12 @@ export function memoryTools(config) {
       name: "memory_update",
       description:
         "Rewrite a memory that has turned out to be wrong or has drifted out of date, keeping its id and its original date. Prefer this over deleting and adding: memories are never overwritten automatically, so a corrected fact added as a new memory just sits alongside the stale one and both come back in future searches. Also use it to put an expiry date on a fact with a known shelf life — once that date passes the memory stops appearing in searches and in the next session's context.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
       inputSchema: {
         type: "object",
         properties: {
@@ -206,12 +230,24 @@ export function memoryTools(config) {
       name: "memory_delete",
       description:
         "Delete one memory by id. Use it when a remembered fact should simply be gone; if it is merely wrong or outdated, memory_update keeps the history instead.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
       inputSchema: { type: "object", properties: { id: MEMORY_ID }, required: ["id"] },
     },
     {
       name: "memory_stats",
       description:
         "Report how many memories are stored, split by repository and category, plus where the data lives on disk.",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
       inputSchema: { type: "object", properties: {} },
     },
   ];

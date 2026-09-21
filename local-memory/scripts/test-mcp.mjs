@@ -51,7 +51,32 @@ const call = async (name, args = {}) => {
   }
 };
 
-show("tools", (await client.listTools()).tools.map((tool) => tool.name));
+const tools = (await client.listTools()).tools;
+show(
+  "tools",
+  tools.map((tool) => ({ name: tool.name, annotations: tool.annotations })),
+);
+const tool = (name) => tools.find((entry) => entry.name === name);
+for (const name of ["memory_search", "memory_list", "memory_stats"]) {
+  const annotations = tool(name)?.annotations;
+  if (
+    annotations?.readOnlyHint !== true ||
+    annotations?.destructiveHint !== false ||
+    annotations?.idempotentHint !== true ||
+    annotations?.openWorldHint !== false
+  ) {
+    throw new Error(`${name} did not preserve its read-only annotations through tools/list`);
+  }
+}
+if (tool("memory_add")?.annotations?.destructiveHint !== false) {
+  throw new Error("memory_add did not preserve its additive-write annotation through tools/list");
+}
+if (tool("memory_update")?.annotations?.destructiveHint !== true) {
+  throw new Error("memory_update did not preserve its destructive-write annotation through tools/list");
+}
+if (tool("memory_delete")?.annotations?.destructiveHint !== true) {
+  throw new Error("memory_delete did not preserve its destructive-write annotation through tools/list");
+}
 
 // The second injection channel: hosts that never run Cursor hooks (every ACP
 // client) see the memories only if they arrive with the handshake.

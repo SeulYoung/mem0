@@ -103,7 +103,42 @@ const tools = memoryTools(loadConfig());
 const tool = (name) => tools.find((entry) => entry.name === name);
 const add = tool("memory_add");
 const search = tool("memory_search");
+const list = tool("memory_list");
 const update = tool("memory_update");
+const remove = tool("memory_delete");
+const stats = tool("memory_stats");
+
+check(
+  "read tools advertise closed-world, side-effect-free annotations",
+  [search, list, stats].every(
+    (entry) =>
+      entry.annotations?.readOnlyHint === true &&
+      entry.annotations?.destructiveHint === false &&
+      entry.annotations?.idempotentHint === true &&
+      entry.annotations?.openWorldHint === false,
+  ),
+);
+check(
+  "memory_add advertises an additive, non-idempotent local write",
+  add.annotations?.readOnlyHint === false &&
+    add.annotations?.destructiveHint === false &&
+    add.annotations?.idempotentHint === false &&
+    add.annotations?.openWorldHint === false,
+);
+check(
+  "memory_update advertises a destructive, non-idempotent local write",
+  update.annotations?.readOnlyHint === false &&
+    update.annotations?.destructiveHint === true &&
+    update.annotations?.idempotentHint === false &&
+    update.annotations?.openWorldHint === false,
+);
+check(
+  "memory_delete advertises a destructive, idempotent local write",
+  remove.annotations?.readOnlyHint === false &&
+    remove.annotations?.destructiveHint === true &&
+    remove.annotations?.idempotentHint === true &&
+    remove.annotations?.openWorldHint === false,
+);
 
 check(
   "the injected protocol carries the length rule verbatim",

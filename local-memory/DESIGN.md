@@ -498,7 +498,9 @@ A 组是关键：英文注解那部分自己就把 BM25 和实体两路都点着
 
 ### 上游 mem0 的已知问题
 
-截至 mem0 v3.1.8，OSS 增删改查全链路仍有以下已知问题。这些都在上游，本层没有绕过；列在这里是为了别把它们当成本层的 bug，也为了将来升级时知道该回头看什么。
+截至 mem0 v3.2.0，OSS 增删改查全链路仍有以下已知问题。这些都在上游，本层没有绕过；列在这里是为了别把它们当成本层的 bug，也为了将来升级时知道该回头看什么。
+
+升级审查：`git diff ts-v3.1.8 ts-v3.2.0 -- mem0-ts` 仅涉及 5 个文件，`src/oss/` 没有变化。新增的 `MEM0_SOURCE` / `MEM0_APPLICATION` / `MEM0_CLIENT_STACK` 请求头及 `SearchMemoryOptions.source` 属于托管平台的 `MemoryClient`，本层使用 `mem0ai/oss` 的 `Memory`，无需接入，也不会改变本地检索或抽取。上游同时更新了工作区的安全依赖约束；这些工作区 overrides 不会自动成为本层的 npm overrides。本次本层锁文件仅更新 mem0ai，自身传递依赖未变。下列 OSS 限制仍需保留。
 
 | 问题 | 影响 |
 | --- | --- |
