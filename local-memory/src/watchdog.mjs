@@ -195,14 +195,14 @@ export async function runWatchdog({ notifications = true, verbose = false } = {}
         projectDir,
         timeoutMs: config.watchdog?.probeTimeoutMs ?? 90000,
       });
-      // The instructions themselves are the whole memory list; keep the verdict
+      // Instructions contain guidance (or a startup failure); keep the verdict
       // file to a summary of them.
       checked.push({
         runtime: label,
         executable,
         ok: result.ok,
         ms: result.ms,
-        ...(result.ok ? { tools: result.tools, injected: result.instructions.length > 0 } : { error: result.error }),
+        ...(result.ok ? { tools: result.tools, guidance: result.instructions.length > 0 } : { error: result.error }),
       });
       report(`probe ${label}: ${result.ok ? `ok in ${result.ms}ms` : `FAILED — ${result.error}`}`);
 

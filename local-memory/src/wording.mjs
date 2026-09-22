@@ -32,46 +32,35 @@
  * it and a priority rule above that has no ceiling anyone can act on.
  */
 export const MEMORY_LENGTH =
-  "Each memory is one self-contained statement that will still make sense months from now, stating the fact itself rather than the conversation it came from — aim for 15-80 words of prose across one to three sentences, and never exceed 120. Identifiers, paths, code spans and figures do not count towards that: keep every one of them, together with the symptom and the correct move, and cut the account of how you got there instead. Completeness beats brevity.";
+  "State one self-contained fact, topic first, without conversation history. Aim for 15-80 prose words in 1-3 sentences; maximum 120. Exclude identifiers, paths, code and figures from the count. Keep relevant details, symptoms and remedies; cut narration. Completeness beats brevity.";
 
 /**
  * mem0's escape for a topic that does not fit — "split into multiple focused
  * memories rather than compressing details away" — spelled out as a second call,
- * because one `memory_add` stores exactly one memory and nothing else says so.
+ * for the default verbatim path; distil can produce zero or multiple memories.
  */
 export const SPLIT_NOT_COMPRESS =
-  "A topic holding more detail than one memory fits is two memories rather than one compressed memory: `memory_add` stores exactly one, so call it again for each focused fact.";
+  "Split independent facts instead of compressing away details. By default, submit each in a separate memory_add call; duplicates may store nothing.";
 
 /**
  * Not mem0's: mem0's own prompt imposes no language rule at all, so this layer
  * adds one. Why, and why it goes unopposed rather than overriding something, is
  * in `llm.customInstructions`.
  *
- * "Never enters", not "cannot be split". The difference is the whole mechanism:
- * `lemmatizeForBm25` keeps `/[a-z0-9]+/g`, so CJK is not an oversized token the
- * index failed to break up — it is absent. Both readings happen to discourage
- * writing CJK, which is why the wrong one survived here after being corrected
- * everywhere else, and it is also why `queryReachWarning` keys on the same
- * `[a-z0-9]` this sentence now describes.
+ * This is a policy for stored text and queries, not for user-facing replies.
+ * Do not claim CJK is always absent: pure CJK has a lemmatisation fallback,
+ * and quoted CJK can enter the entity path. Neither guarantees useful recall.
  */
 export const ENGLISH_ONLY =
-  "Retrieval is English-only: the embedding model is English, and CJK text never enters the keyword index at all, so anything stored in another language is close to unreachable.";
+  "Write memory text and search queries in English for retrieval; this does not set the language of replies to the user.";
 
 /**
  * mem0's "Preserve Specific Details", narrowed to what a code repository's
  * memories turn on: identifiers are what the keyword and entity signals match on.
  *
- * The second sentence is not mem0's, and settles a collision this layer creates
- * on its own: `ENGLISH_ONLY` says CJK is unreachable, this rule says copy
- * identifiers verbatim, and a project whose table names and log strings are
- * Chinese hits both at once. Copying wins, because a translated identifier no
- * longer matches the code — but it buys nothing, and saying so is what stops an
- * agent expecting it to. Measured on this layer's own embedder: an English
- * sentence with a CJK identifier added still sits at 0.98 cosine from the same
- * sentence without it, so it barely moves;
- * `lemmatizeForBm25` matches /[a-z0-9]+/g, so CJK never reaches the keyword
- * index; and the entity route is not reachable from a CJK query at all, because
- * all four of mem0's extractors need an ASCII letter or a quote to fire.
+ * Keep code spelling even when English is required for prose. English glosses
+ * helped retrieval in the experiments below; this is not a guarantee that an
+ * untranslated identifier is unreachable through every signal.
  *
  * `bench-retrieval.mjs` measures the rule end to end rather than identifier by
  * identifier, and it holds: English questions that never name the CJK
@@ -81,12 +70,9 @@ export const ENGLISH_ONLY =
  * 4/5 and 3/3 on the same two shapes of question. That script asserts both
  * halves of this and exits non-zero if either stops being true.
  *
- * What the gloss cannot rescue is a query that is *only* a CJK identifier. The
- * real corpus shows why more precisely than the fixture did: such a query
- * retrieves whichever memory holds the most CJK, not the one holding that
- * identifier — two different CJK queries both landed on the same unrelated
- * memory, the one with the most Chinese characters in the store. On an English
- * embedder a CJK-only query mostly encodes "this text is Chinese".
+ * Two CJK-only queries in that corpus returned the same unrelated memory with
+ * the most CJK characters. That observation motivates a warning, not a claim
+ * that all CJK queries are ranked by character counts.
  *
  * Do not "fix" the unreachable entity route by telling agents to quote a CJK
  * identifier. Quoting is indeed the one thing `extractQuoted` accepts whatever
@@ -99,4 +85,4 @@ export const ENGLISH_ONLY =
  * information, and bare costs nothing by comparison.
  */
 export const KEEP_IDENTIFIERS =
-  "Keep identifiers, file names, paths and command names exactly as they appear: they are what the keyword and entity signals match on, and translating or reformatting one makes it unfindable. Copy an identifier that is itself CJK verbatim too — a translated one stops matching the code — but it reaches neither signal, so the English words that describe it have to be in the same sentence.";
+  "Preserve identifiers, file names, paths and commands verbatim, including CJK identifiers; add an English explanation for non-English identifiers.";

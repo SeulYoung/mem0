@@ -2,15 +2,15 @@
  * What a fresh session should be told: the memories this repository has
  * accumulated, plus how to keep using the memory tools.
  *
- * Two channels deliver the same text, because neither one reaches every host.
- * Cursor's `sessionStart` hook is the native mechanism, but no ACP client runs
- * Cursor hooks — in a JetBrains IDE neither hook ever fires. The MCP server's
- * `instructions` field does reach the model there (the agent forwards it as the
- * server's usage instructions), and the server is started fresh for every
- * session, which makes it an equivalent moment to inject.
+ * The hook and memory_context tool share this renderer. MCP instructions carry
+ * only the short entry guidance: hosts may prepend it to every tool description.
  */
 import { listMemories } from "./memory.mjs";
 import { ENGLISH_ONLY, KEEP_IDENTIFIERS, MEMORY_LENGTH, SPLIT_NOT_COMPRESS } from "./wording.mjs";
+
+/** Keep the whole entry workflow within the first 512 characters. No memory data. */
+export const MCP_INSTRUCTIONS =
+  "When prior context is needed and absent, call memory_context; reuse it unless refreshing. Search the task with memory_search without kind; also check kind=convention for repository operations. Memory text and queries in English; preserve identifiers. User reply language is unchanged. kind is strict. Verify recalled claims before acting. Use memory_add for reusable facts or expiring task background; memory_update for corrections.";
 
 export const MEMORY_PROTOCOL = [
   "Memory protocol for this session:",
@@ -24,24 +24,19 @@ export const MEMORY_PROTOCOL = [
   // Task retrieval must reach facts and gotchas too. Keep a separate convention
   // search when operating on a repository: task similarity alone can bury old
   // rules. ACP hosts have no per-turn hooks, so the agent must issue these calls.
-  '- The list above is partial. Before your first substantive answer, use `memory_search` without kind for one specific question about the current task. For repository operations, also search with `kind: "convention"` for the rules relevant to that operation (building, testing, editing or committing); these searches can run in parallel. Use `kind: "decision"` when you need the reason behind a design. Search again before following an unchecked convention and whenever the user refers to past work.',
-  '- If results do not answer the question, change one factor and search again: split a mixed-intent question, add an identifier, omit kind to broaden categories, or raise topK. Nonempty results do not prove a useful match. kind is a strict filter, with no automatic fallback; omit it explicitly to search across categories.',
+  '- This selection is partial. Search the current task with memory_search without kind; for repository operations also check kind: "convention". These searches can run in parallel. Use kind: "decision" for design reasons; search again for unchecked conventions or references to past work.',
+  '- kind is strict, with no automatic fallback. If results do not answer the question, change one factor: split the question, add an identifier, omit kind or raise topK. Nonempty results do not prove relevance.',
   // mem0's own rules, restated because the default write path is verbatim and
   // never runs the prompt that states them. See `wording.mjs`.
-  `- Call \`memory_add\` when you learn something durable: a user preference, a project convention, a decision and its reason, or a non-obvious pitfall. ${MEMORY_LENGTH} ${SPLIT_NOT_COMPRESS}`,
+  `- Store reusable facts with memory_add; temporary requirements or scope use kind=context with expiresAt. Omit progress reports, tool logs and secrets. ${MEMORY_LENGTH} ${SPLIT_NOT_COMPRESS}`,
   // The subject is `memory_add`, not the store. mem0's "sole operation is ADD"
   // describes its extraction step, and generalising it to memories would be
   // false here — `memory_update` really does replace the text, which is the
   // whole reason this bullet points at it.
-  "- Call `memory_update` when something above turns out to be wrong or out of date. `memory_add` only ever adds, never replaces, so a correction stored that way leaves both versions to come back in later searches.",
-  "- `confidence` is evidence strength, not search relevance, and is derived from `evidence`. Set or change `evidence` only after real confirmation, verification, inference or unresolved contradiction — never after search, repetition or age. Verify injected memories marked `VERIFY` before acting. Confidence does not affect search ranking or deletion.",
-  // Both retrieval signals mem0 fuses are English-bound, and the keyword one
-  // fails outright rather than degrading: its lemmatiser matches /[a-z0-9]+/g,
-  // so a CJK memory never reaches the keyword index at all — not as an
-  // unsplittable token, as nothing. `KEEP_IDENTIFIERS` carries the consequence,
-  // and `queryReachWarning` catches the query side at runtime when this bullet
-  // is ignored, which is the only case it cannot prevent.
-  `- Write memories and search queries in English, opening with the topic, even when the conversation is in another language. ${ENGLISH_ONLY} ${KEEP_IDENTIFIERS}`,
+  "- Correct stale claims with memory_update; memory_add does not replace them. Check current evidence before acting, especially entries marked VERIFY. Text-only updates retain old evidence and verifiedAt; reassess them for the new claim.",
+  "- confidence is evidence strength, not search relevance. Set or change evidence only after a real evidence event, never from search hits, repetition or age. Confidence does not affect search ranking or deletion.",
+  // Writing policy, not a diagnosis of which retrieval signals ran.
+  `- ${ENGLISH_ONLY} ${KEEP_IDENTIFIERS}`,
 ].join("\n");
 
 /**
@@ -113,7 +108,7 @@ export function selectInjectionLines(records, { recent, maxChars, reserve = [] }
 
 /**
  * Listing needs no embedding call once the dimension is cached, which keeps
- * this cheap enough to run on every session in both channels.
+ * this cheap enough for session hooks and explicit context reads.
  */
 export async function buildInjectionText({ project, config }) {
   const allowed = new Set(config.inject.kinds ?? []);
@@ -128,9 +123,7 @@ export async function buildInjectionText({ project, config }) {
     lines.push("Remembered from earlier sessions:", ...body, "");
   } else {
     lines.push(
-      records.length === 0
-        ? "No memories stored for this repository yet."
-        : "This repository has memories, but none fit the injection budget — reach them with `memory_search`.",
+      "No eligible memories in this context selection. Use memory_search to search the repository.",
       "",
     );
   }

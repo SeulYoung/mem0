@@ -234,10 +234,9 @@ export const DEFAULT_CONFIG = {
     /** Channel 1: Cursor's sessionStart hook. Silently absent in hosts that ignore hooks. */
     hookContext: true,
     /**
-     * Channel 2: the MCP server's `instructions`. The only channel that reaches
-     * ACP hosts (JetBrains IDEs and the like), where no Cursor hook ever fires.
-     * Both channels are on by default, which costs a duplicate memory list in
-     * Cursor itself; turn one off once you know which host you use.
+     * MCP short entry guidance only; never embeds memories or the full protocol.
+     * ACP agents fetch context explicitly with memory_context. Disabling this
+     * or inject.enabled suppresses automatic guidance, not the read tool.
      */
     mcpInstructions: true,
     recent: 8,
@@ -267,7 +266,7 @@ export const DEFAULT_CONFIG = {
      * not get, and mem0's own plugin reserves two.
      */
     reserve: ["convention", "preference", "decision"],
-    /** Also tell the agent how to use the memory tools every session. */
+    /** Include full guidance in hook/context output, never in MCP instructions. */
     includeProtocol: true,
   },
 

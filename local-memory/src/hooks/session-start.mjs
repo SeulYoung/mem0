@@ -5,8 +5,7 @@
  * memory tools. `additional_context` is the only documented way to get text
  * into a fresh conversation, so retrieval happens here rather than per prompt.
  *
- * Hosts that never run hooks are covered by the second channel instead — see
- * `../injection.mjs`.
+ * Hosts that never run hooks fetch the same content with memory_context.
  */
 import { ensureConfigFile } from "../config.mjs";
 import { buildInjectionText } from "../injection.mjs";

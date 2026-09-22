@@ -192,7 +192,7 @@ check(
   MEMORY_PROTOCOL.includes("confidence") &&
     MEMORY_PROTOCOL.includes("evidence strength") &&
     MEMORY_PROTOCOL.includes("not search relevance") &&
-    MEMORY_PROTOCOL.includes("Set or change `evidence` only") &&
+    MEMORY_PROTOCOL.includes("Set or change evidence only") &&
     MEMORY_PROTOCOL.includes("does not affect search ranking or deletion"),
 );
 

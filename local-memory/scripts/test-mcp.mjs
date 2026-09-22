@@ -5,7 +5,7 @@
  * tools.
  *
  * Also covers the two things the server does for hosts that run no hooks at all:
- * carrying the memory injection in the handshake, and claiming turns that were
+ * serving context on demand, and claiming turns that were
  * left unfinished.
  */
 import fs from "node:fs";
@@ -59,7 +59,7 @@ show(
   tools.map((tool) => ({ name: tool.name, annotations: tool.annotations })),
 );
 const tool = (name) => tools.find((entry) => entry.name === name);
-for (const name of ["memory_search", "memory_get", "memory_history", "memory_list", "memory_stats"]) {
+for (const name of ["memory_context", "memory_search", "memory_get", "memory_history", "memory_list", "memory_stats"]) {
   const annotations = tool(name)?.annotations;
   if (
     annotations?.readOnlyHint !== true ||
@@ -80,12 +80,11 @@ if (tool("memory_delete")?.annotations?.destructiveHint !== true) {
   throw new Error("memory_delete did not preserve its destructive-write annotation through tools/list");
 }
 
-// The second injection channel: hosts that never run Cursor hooks (every ACP
-// client) see the memories only if they arrive with the handshake.
+// All MCP hosts receive short guidance; memories travel only in context results.
 const instructions = client.getInstructions();
 show("instructions", instructions);
-if (!instructions?.includes("## Local memory (mem0-local)")) {
-  throw new Error("the server handshake carried no memory injection");
+if (!instructions?.includes("memory_context") || instructions.length > 512) {
+  throw new Error("the server handshake must carry short context-fetch guidance");
 }
 if (!instructions.includes("memory_search")) throw new Error("the memory protocol is missing from the instructions");
 
@@ -135,14 +134,16 @@ show("memory_add (identical text again)", readded);
 if (readded.stored !== 0) throw new Error("re-adding an identical memory stored a second copy");
 if (!readded.note) throw new Error("a skipped duplicate must say so in the tool result");
 
-// Built per session rather than baked in, so a memory stored now is there for
-// the next one.
+// New sessions get the same short instructions and fetch up-to-date context.
 const laterClient = await connect();
 const laterInstructions = laterClient.getInstructions() ?? "";
+const laterContextResponse = await laterClient.callTool({ name: "memory_context", arguments: {} });
+if (laterContextResponse.isError) throw new Error("memory_context failed");
+const laterContext = JSON.parse(laterContextResponse.content[0].text);
 await laterClient.close();
-show("instructions carry the new memory", laterInstructions.includes("local-memory 目录"));
-if (!laterInstructions.includes("local-memory 目录")) {
-  throw new Error("instructions are stale: a memory stored before the handshake was not injected");
+show("context carries the new memory", laterContext.text.includes("local-memory 目录"));
+if (laterInstructions !== instructions || !laterContext.text.includes("local-memory 目录")) {
+  throw new Error("memory data belongs in fresh context results, not instructions");
 }
 
 // --- memory_update -----------------------------------------------------------
@@ -293,6 +294,9 @@ const expiredInstructions = afterExpiry.getInstructions() ?? "";
 await afterExpiry.close();
 if (expiredInstructions.includes("MCP 自检记忆")) {
   throw new Error("an expired memory must not be injected into the next session");
+}
+if ((await call("memory_context")).text.includes("MCP 自检记忆")) {
+  throw new Error("expired memories must not appear in context results");
 }
 
 // Addressed by the full id on purpose: an expired memory is invisible to the

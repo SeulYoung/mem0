@@ -13,7 +13,7 @@
 | 总结模型只在后台捕获时调用，MCP 写入默认不调 | 抽取一次约 15 秒。后台进程里没人等它，这笔时间是免费的；而 AI 调 `memory_add` 时交上来的已经是一句干净事实，再过一遍模型只会让工具调用卡住 15 秒 |
 | hooks 负责"一定会记"，MCP 负责"记得好" | hooks 是确定性的，不依赖模型是否想起来调工具；MCP 让 AI 主动写入提炼后的高质量记忆（分工见[两路写入](#两路写入hook-与-mcp)） |
 | hook 捕获的单位是一轮对话，不是一条 prompt | 结论通常在回答里而不是问题里；而 mem0 的 `add()` 本来就收 `Message[]`，所以配对是零额外配额的——每轮仍然只有一次抽取 |
-| 会话注入同时走 hook 和 MCP 握手两条通道 | hooks 只有 Cursor 自己执行，ACP 宿主（JetBrains 等）一条都不跑；MCP 的 `instructions` 两边都到得了 |
+| MCP 统一用短 instructions + memory_context | 避免宿主逐工具重复完整近期记忆；hook 与按需 context 共用选择和渲染逻辑 |
 | 巡检靠**主动起一次服务**，不靠心跳超时 | 心跳只在你开新会话时才跳，"一下午没聊天"和"服务已经死了"长得一模一样。主动探活跟你活不活跃无关，也就没有误报 |
 | 巡检跑在 IDE 之外的独立 node 上 | IDE 自带的运行时正是被监控对象之一；跟着被监控对象一起死的看门狗不算看门狗 |
 | 数据放 `~/.mem0-local` 而非仓库内 | 仓库可以随时替换/重下，记忆不受影响 |
@@ -91,16 +91,16 @@ mem0 的事实抽取
 
 ## 会话注入的两条通道
 
-每个新会话开始时，本仓库的一小批记忆连同一段使用协议一起交给 AI。这件事由两条通道各做一遍，默认都开（`src/injection.mjs` 是它们共用的唯一文本来源）：
+会话记忆有两种获取途径，共用 `src/injection.mjs` 的选择和渲染逻辑。MCP 对所有宿主统一使用短 instructions，不再通过握手提供记忆，也没有完整握手注入兼容模式：
 
 | 通道 | 机制 | 覆盖范围 |
 | --- | --- | --- |
 | `sessionStart` hook | 返回 `additional_context` | 只有 Cursor 自己 |
-| MCP `instructions` | 握手 `initialize` 返回的 `instructions` 字段，agent 把它当作这个 server 的使用说明转交模型 | 任何跑 cursor-agent 的宿主，含 ACP |
+| MCP `memory_context` | 短 instructions 引导按需调用，工具返回近期记忆和完整协议 | 所有 MCP 宿主，含 ACP |
 
-**为什么需要第二条：ACP 宿主根本不执行 Cursor 的 hooks。** 在 CLion 2026.2 里用 `cursor-agent acp` 手工建会话、发 prompt，日志里既没有 `[session-start]` 也没有 `[capture]`——hook 引擎明明打包在 CLI 里、`~/.cursor/hooks.json` 也有效，就是不被调用；而 `~/.cursor/mcp.json` 里的 MCP server 每个会话照常启动。第二条通道是拿一个临时 MCP server 在 `instructions` 里埋魔术串、让模型原样报出来验证的（`test-mcp.mjs` 里有一条用例守着：先写一条记忆，再开一个连接，断言它出现在新连接的 `instructions` 里）。
+**为什么改变 MCP 交付方式：** 2026-09-22 的实际工具元数据显示，当前 Codex 接入链路给六个工具都前置了同一份 6,894 字符的近期记忆与协议，额外重复 34,470 字符。这个观察证明了元数据冗余，不等于每轮模型计费都包含全部工具。服务端原始 tools/list 本来没有这些记忆，重复出现在宿主包装后的工具描述中。
 
-两个代价：**在 Cursor 里同一份记忆会进两次上下文**（各不超过 `inject.maxChars`），确定主力宿主后关掉一条即可；**自动捕获只有 hook 一条路**，ACP 宿主下只能靠 AI 自己调 `memory_add`（见[宿主差异](#宿主差异cursor-与-acp-宿主)）。
+instructions 现在总长不超过 512 字符，只包含入口、英文与标识符要求、严格过滤及基本维护指导。完整协议和记忆通过 memory_context 的普通工具结果提供，每次重新读取，不缓存“已发送”；需要刷新或上下文丢失时可以再取。已有上下文就复用，避免无意义重复读取。代价是依赖 AI 主动调用，不能保证与原先握手直接携带记忆等价。既有 hook 独立保留，但 MCP 不按宿主分支。启动仍检查存储可读性，失败给短 NOT WORKING 指导，详细错误写日志；heartbeat 的 memories 为 null，不冒充已交付记忆数量。
 
 **选哪几条：`inject.reserve` 里的类别各占一个保底名额，剩下的名额按时间填，装不下的跳过。** 只按时间排的那版有个结构性缺陷：一条纲领性约定天生是旧的，于是永远进不了最新的 `recent` 条，名额全给了当天学到的东西——而当天学到的东西恰好是库里最没被验证的部分。一条工作线刚被回滚时最难看：2026-08-26 那次会话开始时注入的 8 条全部来自两天前的 CJK 实验，其中 5 条的说法已经和代码不一致，而真正决定了当天结论的那条 Adapter 原则一条都没进来，得靠 `memory_search` 捞。
 
@@ -137,10 +137,10 @@ mem0 的事实抽取
 | 宿主 | hooks | MCP | 结果 |
 | --- | --- | --- | --- |
 | Cursor 桌面版、`cursor-agent`（含 `--print`） | 全跑 | 有 | 完整：自动记录 + 注入 + 工具 |
-| ACP 宿主（JetBrains 里的 `cursor-agent acp`） | **一个都不跑** | 有 | 缺自动记录，其余齐全 |
+| ACP 宿主（JetBrains 里的 `cursor-agent acp`） | **一个都不跑** | 有 | 按需获取上下文和主动写入，无自动记录 |
 | Cloud Agents | 只认仓库里的 `.cursor/hooks.json`，用户级的不加载；`sessionStart` 本身也不支持 | 有 | 记忆库在本机，本就不适用 |
 
-**这个缺口只丢"一定会记"，不丢"记得好"。** ACP 宿主下 AI 依然拿得到会话注入和 8 个工具，所以它主动写下的高质量记忆一条不少；缺的是那条不依赖模型自觉的确定性通路。这也是为什么两路写入必须都存在：如果自动记录是唯一来源，换一个宿主就等于整套系统静默失效。
+**ACP 下读写都需要 AI 主动调用。** 九个工具仍然可用，会话记忆通过 memory_context 按需获取；自动记录缺少那条不依赖模型自觉的确定性通路。这也是为什么两路写入必须都存在：如果自动记录是唯一来源，换一个宿主就等于整套系统静默失效。
 
 **认领没结束的轮次因此做成了宿主无关的。** 按轮捕获把 prompt 暂存在 `~/.mem0-local/turns/` 里，而认领它的两个 hook（下一条 prompt、下一个 `sessionStart`）都只在 Cursor 跑。所以 MCP server 启动时也认领一次：每类宿主都会起它，于是"在 Cursor 里丢下半轮、然后一整天待在 CLion"这条路径不再是记忆静默少一条。probe 运行（`MEM0_LOCAL_PROBE=1`，巡检和测试走的那条）跳过这一步——让被测试驱动的路径去写真实记忆库，和让它去删一样不合适。
 
@@ -170,7 +170,7 @@ mem0 的事实抽取
 
 词表之外还有第八个值 `prompt`：只有自动记录的 hook 会写，不进注入白名单，用 `prune --kind prompt` 清理。它故意不出现在工具 schema 的 enum 里，免得 AI 把一条正经记忆归到这类下面。
 
-**`kind` 同时是一根检索轴**：`memory_search` 和 CLI 的 `search` 都收 `kind`，把搜索限制在一个类别里。这不是"把结果里别的类别删掉"——过滤发生在 mem0 的库内部、top-k 截断之前，所以过滤后的搜索会往那一个类别里挖得更深，而这正是它的用途：一个仓库的规则在数量上被其他东西压倒，不过滤就永远问不出"这个仓库要求我怎么做"。注入协议的开场两条搜索就靠它。
+**`kind` 同时是一根检索轴**：`memory_search` 和 CLI 的 `search` 都收 kind，在 mem0 的库内部、top-k 截断之前过滤，让专项查询能深入某一类别。开场任务检索不传 kind；操作约定和设计原因的专项查询才显式过滤。
 
 这条路走的是 mem0 的公开 API，没有碰上游文件：`add` 写 payload 时是 `{...metadata, data, textLemmatized, ...}`，metadata 被摊平，所以 `kind` 是 payload 的顶层键；`filterVector` 对非逻辑操作符的键走 `matchFieldCondition(vector.payload, key, value)`，任意 payload 键都能过滤，而且语义那一路和 BM25 那一路共用这个函数；`Memory.search` 构造 `normalizedFilters` 时以 `...config.filters` 开头，三个身份键之外的键原样透传。实体那一路不受影响——mem0 会用 `user_id`/`agent_id`/`run_id` 三个键**重新构造**一个 `entitySearchFilters` 交给实体库，所以 `kind` 不会漏进去把实体加权打成零。因此 `kind` 没有并进 `scopeFilters`：那个函数管的是"这次查询属于哪个仓库"，两件事混在一起会让它的注释说不清自己在做什么。
 
@@ -284,7 +284,7 @@ mem0 的事实抽取
 | 启动自检 | 每个会话的 MCP server 自己 | 服务起来了，但读不到记忆库 | 模型在第一句话里就告诉你"mem0-local 挂了"及原因 |
 | 定时巡检 | Windows 计划任务，每 2 小时 + 每次登录后 2 分钟 | 服务**根本起不来** | 系统通知弹窗 + `doctor` 里的结论 |
 
-**巡检不看心跳，而是按 IDE 的方式真起一次 MCP server**、完成一次真实握手、看工具和记忆注入在不在（约 300ms，理由在 `src/watchdog.mjs` 开头）。用哪个 node 去起是关键：要抓的失效恰恰是"IDE 或 agent 升级把运行时换掉了"，所以它会扫出所有 JetBrains 自带的 agent 运行时逐个探活。顺带的好处是**IDE 一发新版 agent，下一次巡检就替你试过了**：
+**巡检不看心跳，而是按 IDE 的方式真起一次 MCP server**、完成真实握手，检查工具与启动存储状态。短 instructions 模式保留了存储可读性检查，但不表示 AI 已获取会话记忆。用哪个 node 去起是关键：要抓的失效恰恰是 IDE 或 agent 升级把运行时换掉，因此扫描 JetBrains 自带的 agent 运行时逐个探活。下列耗时是此前版本的历史测量：
 
 ```
 probe CLion2026.2 / cursor 2026.07.23: ok in 291ms
@@ -311,7 +311,7 @@ watchdog            all 3 runtime(s) ok 0m ago; scheduled task registered
 
 `scripts/test-health.mjs` 有 23 条断言（指纹、ABI 变更识别、心跳往返、抑制窗口、真实探活、探一个起不了服务的可执行文件）。端到端则是真把 `src/mcp-server.mjs` 改名之后跑巡检：两个运行时同时报失败、错误信息准确指到 `Cannot find module`、系统通知实际弹出、第二次运行被抑制、文件还原后恢复。加 `--notify` 可以让测试真弹一条通知。
 
-**还没覆盖的一种失效**：cursor-agent 哪天不再把 MCP 的 `instructions` 转发给模型。那时工具还在、巡检全绿、`doctor` 全绿，只有注入悄悄没了——因为这是实测出来的行为而非有契约的 API，纯本地探活看不见。要抓它得起一个真实 ACP 会话、埋一个随机串让模型复述，尚未固化成命令。
+**还没覆盖的宿主行为**：本地探活不能证明宿主将 instructions 转发给模型，也不能证明 AI 遵循指导调用了 memory_context。工具描述同样说明使用时机，但主动读取仍不是确定性的自动注入。端到端验证需新建真实 ACP 会话观察实际工具调用，不能用 MCP 协议测试代替。
 
 ## 与 mem0 的边界
 
@@ -372,9 +372,9 @@ watchdog            all 3 runtime(s) ok 0m ago; scheduled task registered
 
 ### 提示词：只补 mem0 没说的
 
-本层一共 4 处提示词文本，读者不是同一个：`llm.customInstructions`（`src/config.mjs`，抽取模型读）、`MEMORY_PROTOCOL`（`src/injection.mjs`，和你对话的 AI 读）、8 个工具及参数的 `description`（`src/tools.mjs`，同上）、`# Response rules`（`src/llm.mjs` 的 `buildPrompt`，抽取模型读）。
+本层有 5 处提示词文本：`llm.customInstructions`（抽取模型读）、精炼 `MCP_INSTRUCTIONS`（宿主可能逐工具重复）、`MEMORY_PROTOCOL`（hook/context 返回给对话 AI）、9 个工具及参数的 description，以及 `# Response rules`（抽取模型读）。完整公共规则仍只写在 wording.mjs，由需要它的入口组合。
 
-**共用的句子只写一遍，放 `src/wording.mjs`。** 给 AI 的那两处要重述 mem0 的同一份约定，重述两遍就会各自漂移——实际发生过：两处只引了 `15-80 words` 而丢了优先级规则，`memory_update` 还比 mem0 少允许两句。所以长度规则、拆分出路、英文与标识符这四条句子是常量，由协议文本和工具 schema 组合，`memory_update` 则只**指向** `memory_add`（指向是唯一不可能漂移的形式）。给抽取模型的那两处**刻意不引用**这些常量：它们是追加在 mem0 提示词后面的，mem0 已经说过的话在那里只该出现一次——在 mem0 自己那份里。
+**源码复用，工具独立可理解。** 长度、拆分、英文与标识符规则定义在 wording.mjs，由协议和工具 schema 组合。update 自带正文、类别和证据规则，不再指向 add 的参数说明，因为宿主可能只发现一个工具。英文要求只约束记忆和查询，不改变回复语言。context 允许带到期日的可复用临时背景；类别与 evidence 分开。抽取模型保留原有 customInstructions 和 JSON 输出规则，不重复这些质量约定。
 
 **工具 schema 从 `mcp-server.mjs` 拆到了 `src/tools.mjs`。** 它们是提示词而不是代码：ACP 通道里 AI 看到的一半就是这些 description，而 `mcp-server.mjs` 顶层有 `await server.connect()`，导入即起服务，测试没法读。拆开之后服务器只剩管线，文本可以无副作用导入。
 
@@ -463,9 +463,9 @@ A 组是关键：英文注解那部分自己就把 BM25 和实体两路都点着
 
 另外值得记的是**比例**：45 条里只有 7 条含中文（16%），且每条的中文占比只有 0.3%–2.2%。手写 fixture 是 8 条里 3 条、密度高得多——也就是说 fixture **高估**了这个现象，真实情况下英文注解占的比重更大，规则只会比测出来的更稳。
 
-**于是纯中文查询有一道运行时护栏。** 协议里已经写了"查询也用英文"，但那是提示词，会被忽略；而这个失败模式是**安静的**——返回的不是空结果，是一份看起来正常、实则按"中文字多少"排出来的列表，调用方没有任何线索。`memory.mjs` 里的 `queryReachWarning(query)` 判一件事：查询里有没有 `[a-z0-9]`。没有，就说明 BM25 拿到零个词元、四个实体抽取器一个都点不着，只有嵌入模型跑了。`memory_search` 把它作为 `warning` 字段放在 `results` **前面**（先读到命中就已经开始信了），CLI 打在 **stderr** 上、列表之前（免得混进记录，也免得被六条结果盖过去）。三个决定：
+**纯中文查询使用启发式提醒。** queryReachWarning 只判断是否缺少 ASCII 字母或数字，不检查实际检索信号。它建议用英文查询并保留标识符，不断言“只有嵌入运行”或“按中文数量排序”。纯 CJK 的 lemmatizeForBm25 有原文回退，带引号 CJK 可进入实体路径，重排也可能运行。此前语料的失败观察不能推广为每次查询的确定结论。warning 仍位于 MCP results 前面，CLI 仍写 stderr。
 
-- **警告而不是拒绝。** 排序是任意的，不是空的，第一名碰巧对不对只有调用方知道。它要防的是这份结果**看起来像正常结果**。
+- **警告而不是拒绝。** 提示潜在的不可靠召回，不声称结果一定错误。
 - **界线画在"有没有 ASCII 字母或数字"，不是"有没有中文"。** 判据要和失效原因同构：`lemmatizeForBm25` 只留 `/[a-z0-9]+/g`，所以 `5.4` 这种纯数字查询是真词元，不该报警；而混一个英文词进去（`空投宝箱 chest`）就够点亮关键词路——这正是警告要求调用方做的事，所以它必须让警告消失，否则等于让人白改。俄文、日文假名同样落在这条线的正确一侧。
 - **带引号的中文不豁免。** `extractQuoted` 确实能抽到它，实体那一路真的会亮；但上面量过，它给两个无关查询发的是同一份加权，亮了也不改变调用方该做什么。
 - 判据是纯函数，所以断言在 `test-retrieval.mjs` 里不花钱（七个正反例，重点是**不误报**：一个见谁都响的警告等于没有）；`test-mcp.mjs` 验字段真的出现在工具返回里、且英文查询不带它，`test-cli.mjs` 验它落在 stderr 而不是 stdout。
@@ -520,7 +520,7 @@ A 组是关键：英文注解那部分自己就把 BM25 和实体两路都点着
 | 模型产出的 `linked_memory_ids` 被丢弃 | 抽取 schema 里声明了这个字段，OSS 实现不落库，记忆之间的关联拿不到 |
 | 隐身的记忆能改变可见记忆的分数 | `keywordSearch` 与实体检索都不看到期日（前者连身份键之外的过滤都不做减法：它照 `filters` 过滤，但过期与否不在其中）。于是一条已过期的记忆命中 BM25 或实体，就会把分母抬高，哪怕没有任何可见结果真的拿到那份加分。不泄露内容，只污染分值 |
 | 默认 `threshold: 0.1` 基本不起作用 | 它只作用于原始语义分，而 bge-small 对完全无关的英文句子普遍给到 0.4–0.6，所以 `memory_search` 几乎总是返回满 topK。调高它并不能解决（分母不可比），真正把相关的顶上来的是重排 |
-| BM25 对中文完全失效 | `lemmatizeForBm25` 遇到不含 ASCII 的文本会直接返回整串原文，而分词按空白切，中文没有空格，整句变成一个 token，永不命中 |
+| BM25 缺少中文分词 | 混合文本通常只保留 ASCII 词元；纯非 ASCII 文本回退原文并按空白切分，可能整句成为一个 token。字面相同内容仍可能命中，不能概括为永不命中 |
 | 每次读都是全表扫描 | `search` / `list` / `keywordSearch` 都是 `SELECT * FROM vectors` 再逐行 JSON.parse。万级以内无感 |
 | `vectorStore.list` 没有 `ORDER BY`，而 `getAll` 用 `slice(0, topK)` 截断 | 全表扫描按插入顺序返回，所以任何小于集合规模的 `topK` 截到的都是**最旧**的那批。本层所有读取因此一律向 mem0 要整个集合，排序和截断自己做——否则注入会停在旧记忆上、判重看不见新记忆、短 id 也解析不到新记忆，而且全程不报错 |
 

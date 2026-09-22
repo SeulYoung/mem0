@@ -16,8 +16,8 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { loadConfig } from "../src/config.mjs";
-import { MEMORY_PROTOCOL } from "../src/injection.mjs";
-import { MAX_CONFIDENCE_REASON_CHARS } from "../src/memory.mjs";
+import { MCP_INSTRUCTIONS, MEMORY_PROTOCOL } from "../src/injection.mjs";
+import { KINDS, EVIDENCE_LEVELS, MAX_CONFIDENCE_REASON_CHARS, queryReachWarning } from "../src/memory.mjs";
 import { memoryTools } from "../src/tools.mjs";
 import { ENGLISH_ONLY, KEEP_IDENTIFIERS, MEMORY_LENGTH, SPLIT_NOT_COMPRESS } from "../src/wording.mjs";
 
@@ -88,7 +88,7 @@ for (const marker of LANGUAGE_MARKERS) {
  */
 check(
   "the length rule still counts prose only, and still names a ceiling",
-  /do not count towards that/.test(MEMORY_LENGTH) && /120/.test(MEMORY_LENGTH),
+  /prose/.test(MEMORY_LENGTH) && /120/.test(MEMORY_LENGTH) && /Exclude/.test(MEMORY_LENGTH),
   MEMORY_LENGTH,
 );
 check(
@@ -109,6 +109,18 @@ const remove = tool("memory_delete");
 const stats = tool("memory_stats");
 
 check(
+  "MCP guidance is short, self-contained and free of full protocol or memory data",
+  MCP_INSTRUCTIONS.length <= 512 && MCP_INSTRUCTIONS.includes("memory_context") &&
+    MCP_INSTRUCTIONS.includes("English") && MCP_INSTRUCTIONS.includes("without kind") &&
+    !MCP_INSTRUCTIONS.includes(MEMORY_PROTOCOL) && !MCP_INSTRUCTIONS.includes("Remembered from earlier sessions"),
+);
+check(
+  "context retrieval is discoverable and not suppressed after a first read",
+  tool("memory_context")?.description.includes("Reads current data on every call") &&
+    tool("memory_context")?.inputSchema.additionalProperties === false,
+);
+
+check(
   "opening searches cover the task without a category and retain operation-specific conventions",
   MEMORY_PROTOCOL.includes("without kind") &&
     MEMORY_PROTOCOL.includes('kind: "convention"') &&
@@ -125,7 +137,7 @@ check(
 
 check(
   "read tools advertise closed-world, side-effect-free annotations",
-  [search, list, stats, tool("memory_get"), tool("memory_history")].every(
+  [search, list, stats, tool("memory_get"), tool("memory_history"), tool("memory_context")].every(
     (entry) =>
       entry?.annotations?.readOnlyHint === true &&
       entry.annotations?.destructiveHint === false &&
@@ -176,13 +188,14 @@ check(
     search.inputSchema.properties.query.description.includes(KEEP_IDENTIFIERS),
 );
 
-// memory_update writes the same field as memory_add, and the drift that started
-// this suite was it asking for a single "sentence" where mem0 allows three. It
-// points at memory_add rather than restating, so what is asserted is the pointer.
+// Each discovered tool must stand alone: the host may not expose other tools.
 const updateText = update.inputSchema.properties.text.description;
 check(
-  "memory_update points at memory_add instead of restating its own length rule",
-  updateText.includes("memory_add describes") && !/\bsentence\b/.test(updateText),
+  "memory_update carries its own text, category and evidence guidance",
+  updateText.includes(MEMORY_LENGTH) && updateText.includes(KEEP_IDENTIFIERS) &&
+    KINDS.every((kind) => update.inputSchema.properties.kind.description.includes(`${kind}:`)) &&
+    EVIDENCE_LEVELS.every((level) => update.inputSchema.properties.evidence.description.includes(`${level}:`)) &&
+    !JSON.stringify(update.inputSchema).includes("memory_add"),
   updateText,
 );
 check(
@@ -190,9 +203,9 @@ check(
   add.inputSchema.properties.evidence.description.includes("mapped to confidence") &&
     add.inputSchema.properties.evidence.description.includes("stated: unchecked explicit claim") &&
     add.inputSchema.properties.evidence.enum.includes("user_confirmed") &&
-    update.inputSchema.properties.evidence.description.includes("memory_add's levels") &&
+    update.inputSchema.properties.evidence.description.includes("stated: unchecked explicit claim") &&
     update.inputSchema.properties.evidence.description.includes("real evidence event") &&
-    update.inputSchema.properties.confidenceReason.description.includes("Required when changing evidence"),
+    update.inputSchema.properties.confidenceReason.description.includes("whenever evidence is supplied"),
 );
 check(
   "both confidence reasons are short evidence accounts, not duplicate memories",
@@ -206,11 +219,30 @@ check(
   add.inputSchema.properties.verifiedAt.description.includes("Only valid for those levels") &&
     add.inputSchema.properties.verifiedAt.description.includes("server timestamps high evidence now") &&
     add.inputSchema.properties.verifiedAt.format === "date-time" &&
-    update.inputSchema.properties.verifiedAt.description.includes("omission preserves the existing time") &&
+    update.inputSchema.properties.verifiedAt.description.includes("otherwise preserves the existing time") &&
     update.inputSchema.properties.verifiedAt.description.includes("Downgrading evidence clears it automatically") &&
     update.inputSchema.properties.verifiedAt.type === "string" &&
     update.inputSchema.properties.verifiedAt.format === "date-time",
 );
+
+check("English requirement is scoped to tool content, not user replies",
+  MCP_INSTRUCTIONS.includes("Memory text and queries in English") && !MCP_INSTRUCTIONS.includes("Use English;"));
+check("cardinality and extraction fallback are explicit",
+  !SPLIT_NOT_COMPRESS.includes("exactly one") &&
+  add.inputSchema.properties.distil.description.includes("zero or more") &&
+  add.inputSchema.properties.distil.description.includes("unavailable or fails"));
+check("temporary context is allowed without conflating category with evidence",
+  add.description.includes("context") && add.description.includes("expiresAt") &&
+  !MEMORY_LENGTH.includes("months from now") &&
+  !add.inputSchema.properties.kind.description.includes("verified state"));
+check("larger topK may change ordering",
+  search.inputSchema.properties.topK.description.includes("change ordering") &&
+  !search.inputSchema.properties.topK.description.includes("extra ones are weaker"));
+const languageWarning = queryReachWarning('"中文标识符"');
+check("language warning recommends an action without claiming executed signals",
+  languageWarning?.includes("search again in English") &&
+  !/only the embedding|saw nothing|ranked these memories by/.test(languageWarning) &&
+  !/never enters|reaches neither|makes it unfindable/.test(ENGLISH_ONLY + KEEP_IDENTIFIERS));
 
 /**
  * The one prompt that must NOT share these sentences: `llm.customInstructions`

@@ -224,17 +224,17 @@ function visibleIn(record, projectId, scope) {
  */
 export const KIND_GUIDE = {
   preference:
-    "A person's taste, independent of any repository: which language to answer in, which tools, how to write a commit. The subject is a human.",
+    "A person's preferences: reply language, tools or writing style. Storage remains repository-scoped.",
   convention:
-    "A rule this repository expects you to follow. Reads naturally as an instruction — do it this way, never that way.",
+    "A repository rule to follow.",
   decision:
-    "A choice already made, together with the reason. Names the option it beat, or why the obvious one was rejected.",
+    "A choice already made and its reason or tradeoff.",
   gotcha:
-    "Behaviour that bites silently: not knowing it gets you code that looks right and is wrong, with no error to warn you. Say what goes wrong.",
-  fact: "A measurement, or verified state of something outside your control. Nothing to obey and no symptom to avoid — a number or a shape you would otherwise have to work out again.",
+    "A non-obvious silent failure: name the symptom and remedy.",
+  fact: "A measurement or state of something. Evidence separately records whether it was verified.",
   context:
-    "Why one piece of work is happening and what it covers: the requirement behind it, the files and assets in scope, a design agreed but not yet built. Requires an expiresAt — it is true for a stretch of work, not indefinitely.",
-  note: "None of the above, and still worth having next session. The fallback, and rarely the right answer.",
+    "Reusable task background, requirements or scope with an expiresAt; not a progress report.",
+  note: "Reusable information that fits no other category.",
 };
 
 export const KINDS = Object.keys(KIND_GUIDE);
@@ -544,31 +544,15 @@ export async function addMemory({
 }
 
 /**
- * The one query shape this store cannot answer, named at the moment it is asked.
- *
- * Two of mem0's three signals are ASCII-bound: `lemmatizeForBm25` keeps only
- * `/[a-z0-9]+/g`, and every entity extractor needs an ASCII letter or a quote.
- * A query holding neither a Latin letter nor a digit therefore reaches the
- * embedding model alone — an English model, scoring text it was never trained
- * on. Measured against 45 real memories: two unrelated CJK queries both
- * returned the memory holding the most Chinese characters, because "this text
- * is Chinese" is most of what such an embedding encodes.
- *
- * A warning rather than a refusal. The ranking is arbitrary, not empty, and
- * only the caller can tell whether the top hit happens to be the right one —
- * what it must not do is arrive looking like an ordinary result set. The fix is
- * the caller's too, and it is cheap: `ENGLISH_ONLY` means the memory being
- * looked for is in English, so the query has an English form that works.
- *
- * Quoted CJK is deliberately not exempted, even though `extractQuoted` is the
- * one extractor that accepts it. That route does fire, but it was measured to
- * hand two unrelated queries the same boost profile, so reaching it changes
- * nothing the caller should do differently.
+ * Heuristic warning for queries outside the English writing policy. This only
+ * inspects query text; it cannot diagnose active signals or ranking quality.
+ * Pure CJK can survive lemmatisation, quoted entities can be extracted, and a
+ * reranker may run. The existing experiments still justify suggesting English.
  */
 export function queryReachWarning(query) {
   const text = String(query ?? "").trim();
   if (!text || /[a-z0-9]/i.test(text)) return null;
-  return "This query has no Latin letters or digits, so mem0's keyword index and entity extractors both saw nothing and only the embedding model ran. That model is English-only, so it ranked these memories by how much non-English text they hold rather than by what they say. Treat the order as arbitrary and search again in English, using the words the memory itself would use.";
+  return "This query has no Latin letters or digits. Retrieval may be unreliable; search again in English, preserving identifiers and adding an English explanation. This warning checks query text, not which retrieval signals ran.";
 }
 
 export async function searchMemories({

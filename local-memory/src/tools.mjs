@@ -22,25 +22,16 @@ const SCOPE_READ = {
   description: 'Search this repository ("project", default) or every repository ("all").',
 };
 
-/**
- * The catalog, plus the two overlaps that get judged wrong (measurements filed as
- * `gotcha`, this layer's own choices filed as `fact`), the one thing that is not
- * a memory at all (a progress report, which is wrong within the week), and where
- * task background goes now that it has a kind of its own.
- */
+/** Compact category definitions shared by independently discoverable write tools. */
 const KIND_DESCRIPTION = [
-  'Which category the memory belongs to (default "note"):',
+  'Choose by content, independently of evidence:',
   ...Object.entries(KIND_GUIDE).map(([kind, test]) => `- ${kind}: ${test}`),
-  "If it fits both fact and gotcha, ask whether something goes wrong when you do not know it, and whether it goes wrong quietly — a constraint that fails loudly on the first try is a fact, not a gotcha.",
-  "If it fits both convention and decision, what you have to follow is a convention; what explains why things look the way they do is a decision.",
-  'Never store a progress report: "X is now done" stops being true and reads as news forever. Write the durable fact the work left behind.',
-  "The background of the work you are doing is context, not note — and it is refused without an expiresAt, because nothing else in this store ever removes it.",
 ].join("\n");
 
 const MEMORY_ID = {
   type: "string",
   description:
-    'Memory id from memory_search, memory_list, or the list injected at the start of this session. The shortened eight-character form shown there is enough. Must name a memory belonging to this repository — memories owned by another repository are readable with scope "all" but can only be changed from the repository that owns them.',
+    'ID from a read result: full UUID or unambiguous prefix (usually eight characters). Must belong to this repository; cross-repository reads do not grant write access.',
 };
 
 const READ_MEMORY_ID = {
@@ -50,7 +41,7 @@ const READ_MEMORY_ID = {
 };
 
 const EVIDENCE_DESCRIPTION =
-  `Evidence basis (default "${DEFAULT_EVIDENCE}"), mapped to confidence: ${EVIDENCE_LEVELS.map((level) => `${level}=${EVIDENCE_CONFIDENCE[level]}`).join(", ")}. ` +
+  `Evidence basis, mapped to confidence: ${EVIDENCE_LEVELS.map((level) => `${level}=${EVIDENCE_CONFIDENCE[level]}`).join(", ")}. ` +
   "user_confirmed: explicit user confirmation or request; verified: direct code, test, configuration or tool evidence; stated: unchecked explicit claim; inferred: reasoning; disputed: unresolved contradiction.";
 
 const EVIDENCE = {
@@ -72,9 +63,15 @@ const HISTORICAL_VERIFIED_AT =
 export function memoryTools(config) {
   return [
     {
+      name: "memory_context",
+      description: "Fetch missing prior context: a budgeted selection of this repository's curated memories and optional guidance, as {project, count, text}. Reuse unless refreshing or recovering lost context. Reads current data on every call. Use memory_search for task-specific recall.",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    },
+    {
       name: "memory_search",
       description:
-        "Search the local memory store for things learned in earlier sessions (user preferences, project conventions, past decisions, gotchas). Call this before answering questions that depend on prior context, and whenever the user refers to something previously discussed.",
+        "Search stored memories for the current task or past work. Results are leads to verify, not proof of correctness. If unhelpful, change one factor: split the query, add an identifier, omit kind or raise topK.",
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -86,13 +83,13 @@ export function memoryTools(config) {
         properties: {
           query: {
             type: "string",
-            description: `Natural-language description of what you are looking for, in English — memories are stored in English, so translate the user's wording rather than passing it through. ${ENGLISH_ONLY} ${KEEP_IDENTIFIERS}`,
+            description: `One specific question, topic first. ${ENGLISH_ONLY} ${KEEP_IDENTIFIERS}`,
           },
           topK: {
             type: "integer",
             minimum: 1,
             maximum: 50,
-            description: `How many memories to return (default ${config.search.topK}). Raise it when the first answer looks incomplete; the results are ordered, so the extra ones are weaker matches rather than more of the same.`,
+            description: `Maximum results (default ${config.search.topK}). Increase for incomplete results; a larger candidate pool may also change ordering.`,
           },
           // Narrowing happens inside the store, before the result set is cut, so
           // a filtered search is not the unfiltered one with rows removed — it
@@ -102,7 +99,7 @@ export function memoryTools(config) {
             type: "string",
             enum: KINDS,
             description:
-              "Strictly restrict the search to one category, with no automatic fallback. Omit kind for the initial task search across all categories. Use convention for operation-specific rules, decision for design reasons, or gotcha for silent failures. If results do not answer the question, explicitly omit kind on a new search to broaden categories.",
+              "Strict category filter; no automatic fallback. Omit for task search across categories. Use convention for operation rules, decision for design reasons, gotcha for silent failures.",
           },
           scope: SCOPE_READ,
           explain: {
@@ -142,7 +139,7 @@ export function memoryTools(config) {
     },
     {
       name: "memory_add",
-      description: `Store one durable fact worth remembering in future sessions: a user preference, a project convention, an architectural decision and its reason, or a non-obvious pitfall. ${MEMORY_LENGTH} ${SPLIT_NOT_COMPRESS} Do not store transient task state, secrets, or anything already obvious from the code.`,
+      description: `Store reusable knowledge. Temporary task background is allowed as context with expiresAt. Exclude progress reports, tool logs, secrets and trivial code restatements. ${MEMORY_LENGTH} ${SPLIT_NOT_COMPRESS}`,
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -154,10 +151,10 @@ export function memoryTools(config) {
         properties: {
           text: {
             type: "string",
-            description: `The memory, as one self-contained English statement opening with the topic it is about — English even when the conversation is in another language. ${ENGLISH_ONLY} ${KEEP_IDENTIFIERS}`,
+            description: `${ENGLISH_ONLY} ${KEEP_IDENTIFIERS}`,
           },
-          kind: { type: "string", enum: KINDS, description: KIND_DESCRIPTION },
-          evidence: EVIDENCE,
+          kind: { type: "string", enum: KINDS, description: `Default note. ${KIND_DESCRIPTION}` },
+          evidence: { ...EVIDENCE, description: `Default ${DEFAULT_EVIDENCE}. ${EVIDENCE_DESCRIPTION}` },
           confidenceReason: {
             type: "string",
             maxLength: MAX_CONFIDENCE_REASON_CHARS,
@@ -172,17 +169,17 @@ export function memoryTools(config) {
           distil: {
             type: "boolean",
             description:
-              "Default false, which stores your text as written — normally the right choice, since you are already writing one clean fact. Set true only to hand a longer, messy passage to the summarisation model, which will split it into facts and drop anything already stored. Costs about 15 seconds.",
+              "Default false: store the submitted fact verbatim, subject to dedupe. True: ask the model to extract zero or more new memories from a longer passage. If the model is unavailable or fails, the passage may be stored verbatim; read returned IDs to check. Slower than a normal write.",
           },
           expiresAt: {
             type: "string",
             description:
-              'Date after which this memory is ignored, as "YYYY-MM-DD". Set it when the fact has a known shelf life — a measured duration, a dependency version, a workaround for a bug that will be fixed. Required for kind "context". Leave it out for anything that should be remembered indefinitely.',
+              'Expiry date as YYYY-MM-DD; required for context. Omit for indefinite retention. Expired records are hidden from search and context.',
           },
           force: {
             type: "boolean",
             description:
-              "Store the memory even though an existing one already says nearly the same thing. Only use this after a rejection told you which memory it collided with and you decided the two really are different facts; the normal response to that rejection is memory_update on the memory named in it.",
+              "Bypass the adapter's duplicate guard only after checking the collision and deciding these are distinct facts. Prefer memory_update for corrections. Does not bypass the extraction model's own deduplication.",
           },
         },
         required: ["text"],
@@ -214,7 +211,7 @@ export function memoryTools(config) {
     {
       name: "memory_update",
       description:
-        "Rewrite a memory that has turned out to be wrong or has drifted out of date, keeping its id and its original date. Prefer this over deleting and adding: memories are never overwritten automatically, so a corrected fact added as a new memory just sits alongside the stale one and both come back in future searches. Also use it to put an expiry date on a fact with a known shelf life — once that date passes the memory stops appearing in searches and in the next session's context.",
+        "Correct a memory in place, preserving ID, creation time and text history. Omitted fields stay unchanged: text-only edits retain old evidence and verifiedAt, so reassess them. Supply at least one change. Returns the persisted record.",
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
@@ -225,39 +222,37 @@ export function memoryTools(config) {
         type: "object",
         properties: {
           id: MEMORY_ID,
-          // Pointer rather than a second copy of the length rule: both tools are
-          // listed together in every session, and pointing is the one form that
-          // cannot drift from what it points at.
+          // Share source constants, but make a separately discovered tool complete.
           text: {
             type: "string",
             description:
-              "The corrected memory, written the way memory_add wants it: one self-contained English statement opening with the topic, at the length and level of detail memory_add describes. State the fact as it is now — do not describe the correction.",
+              `State the current claim, not the correction process. ${MEMORY_LENGTH} ${ENGLISH_ONLY} ${KEEP_IDENTIFIERS}`,
           },
           kind: {
             type: "string",
             enum: KINDS,
-            description: "Move the memory to a different category, judged by the same tests memory_add lists.",
+            description: `Omit to preserve the category. ${KIND_DESCRIPTION}`,
           },
           evidence: {
             ...EVIDENCE,
             description:
-              "Replace evidence and its derived confidence using memory_add's levels. Requires confidenceReason and a real evidence event; search hits, repetition and age do not count.",
+              `${EVIDENCE_DESCRIPTION} Omit to preserve. Supplying even the same level requires confidenceReason and a real evidence event, not search hits, repetition or age.`,
           },
           confidenceReason: {
             type: "string",
             maxLength: MAX_CONFIDENCE_REASON_CHARS,
             description:
-              `One short sentence (max ${MAX_CONFIDENCE_REASON_CHARS} characters) explaining why the current evidence level applies. Required when changing evidence; may be supplied alone to clarify it.`,
+              `One short sentence (max ${MAX_CONFIDENCE_REASON_CHARS} characters) naming the basis. Required whenever evidence is supplied, even unchanged; may be supplied alone to clarify it.`,
           },
           verifiedAt: {
             type: "string",
             format: "date-time",
-            description: `${VERIFIED_AT_DESCRIPTION} When setting high evidence, omit to use server time; on other updates omission preserves the existing time. ${HISTORICAL_VERIFIED_AT} Downgrading evidence clears it automatically.`,
+            description: `${VERIFIED_AT_DESCRIPTION} Supplying verified/user_confirmed, even unchanged, timestamps now unless given a known historical time; omission otherwise preserves the existing time. Downgrading evidence clears it automatically.`,
           },
           expiresAt: {
             type: ["string", "null"],
             description:
-              'Date after which this memory is ignored, as "YYYY-MM-DD". Use it for facts with a known shelf life, such as a measured duration or a dependency version. Pass null to remove an expiry that was set earlier, which a "context" memory does not allow.',
+              'YYYY-MM-DD; omit to preserve, null to clear. The resulting kind=context requires an expiry. Expired records disappear from search and refreshed context.',
           },
         },
         required: ["id"],

@@ -1,6 +1,6 @@
 # local-memory — 给 Cursor 的全本地记忆层
 
-在**所有**代码工程里为 AI 提供持久记忆：始终自动记录、会话开始自动注入、数据 100% 留在本机。
+在代码工程里为 AI 提供持久记忆：Cursor hooks 自动记录，MCP 按需读取会话记忆，数据留在本机。
 
 - **不改动本仓库任何上游文件**，全部实现都在这一个目录内（见 [升级指南](#升级指南)）
 - **无 Docker、无 Python、无 Ollama**：只要 Node ≥ 20
@@ -20,8 +20,9 @@ Cursor / JetBrains 等 ACP 宿主（任意工程）
 │   ├── afterAgentResponse  → 把 AI 的回答追加到同一轮
 │   └── stop                → 一轮结束，prompt + 回答一起交给后台进程写入
 │
-└── MCP server（~/.cursor/mcp.json）        供 AI 主动读写，并在握手时注入记忆
-    ├── instructions        → 同一份记忆 + 协议，宿主无关
+└── MCP server（~/.cursor/mcp.json）        供 AI 主动读写，所有宿主统一
+    ├── instructions        → 不超过 512 字符的入口指导，无记忆正文
+    ├── memory_context      → 按需读取近期记忆 + 完整协议
     └── memory_search / memory_get / memory_history / memory_add / memory_list / memory_update / memory_delete / memory_stats
                     │
                     ▼
@@ -64,7 +65,7 @@ node src/cli.mjs doctor           # 自检
 
 然后**重启 Cursor**（或 Reload Window）。安装脚本只新增自己的条目，已有的 MCP server 和 hooks 都保留，且每次写入前自动备份为 `*.bak-<时间戳>`。
 
-验证：Cursor Settings → MCP 里能看到 `mem0-local` 的 8 个工具；Customize → Hooks 里能看到四个 hook（`sessionStart` 注入，`beforeSubmitPrompt` / `afterAgentResponse` / `stop` 合起来记录一轮对话）。想用总结模型还需要 Cursor CLI 处于登录状态（`cursor-agent status`）；不想用就把 `llm.enabled` 设成 `false`。
+验证：Cursor Settings → MCP 里能看到 `mem0-local` 的 9 个工具；Customize → Hooks 里能看到四个 hook（`sessionStart` 注入，`beforeSubmitPrompt` / `afterAgentResponse` / `stop` 合起来记录一轮对话）。想用总结模型还需要 Cursor CLI 处于登录状态（`cursor-agent status`）；不想用就把 `llm.enabled` 设成 `false`。
 
 用环境变量存 Cursor 凭据的话（`llm.apiKey` 默认就是 `env:CURSOR_API_KEY`），要设成用户级永久变量，重启 Cursor 后 hook 子进程才继承得到：
 
@@ -93,9 +94,9 @@ node scripts/test-hooks.mjs D:\UGit\HappyArenaTMR\HappyArena
 **你不需要做任何事**，正常和 AI 对话即可：
 
 - **每一轮对话**（你的 prompt ≥25 字符、非 `/` 开头）会被自动记录：prompt 在你按下回车时暂存，AI 的回答在这一轮结束时并进来，两半一起交给总结模型提炼成干净的**英文**事实（后台进行，你感觉不到）。同一条 prompt 重发不会再记一遍，也不会再花一次模型调用。**这一条只在 Cursor 里成立**，ACP 宿主下没有自动捕获
-- 每个新会话开始时，本仓库的既有记忆会被自动注入（两条通道，宿主无关）
+- MCP 握手只提供精炼指导，需要历史上下文且当前上下文中没有时，AI 调用 `memory_context`；Cursor 的既有 sessionStart hook 仍可直接提供上下文
 - AI 学到值得长期记住的东西（偏好、约定、决策理由、坑）时会调 `memory_add`；同一句事实写第二次会被挡掉，换个说法写也会被挡掉并告诉它撞上了哪一条
-- AI 需要回忆过去时会调 `memory_search`（自动记录的对话也在检索范围内）。**查询也得是英文**：不含任何 ASCII 字母或数字的查询只有语义一路能跑，检索出来的其实是"哪条记忆的中文最多"，所以这种查询会带回一条 `warning`，说明这次排序是任意的（理由见 [DESIGN.md](DESIGN.md#检索的三路信号)）
+- AI 需要回忆过去时会调 `memory_search`（自动记录的对话也在检索范围内）。记忆正文和查询使用英文，用户回复语言不受此规则影响。不含 ASCII 字母或数字的查询会带回 `warning`，建议保留标识符并补充英文描述；它是查询文本启发式，不是本次检索路径或排序质量的确定诊断。
 - 每条新记忆带一个证据等级，确定性映射成 `confidence`：`user_confirmed=1`、`verified=0.9`、`stated=0.7`、`inferred=0.4`、`disputed=0.2`。它表示**证据有多可靠**，不是它和某次查询有多相关；低于 `0.5` 的注入会明确标成 `VERIFY`，但不参与排序，也不会自己隐藏或删除记忆
 
 ### 检索与维护接口
@@ -104,9 +105,12 @@ node scripts/test-hooks.mjs D:\UGit\HappyArenaTMR\HappyArena
 
 | 工具 | 参数与返回 |
 | --- | --- |
+| `memory_context` | 无参数，返回 `{project, count, text}`。当前仓库的近期精选记忆和完整指导；每次调用重新读取，受 recent、maxChars、kinds、reserve 和 includeProtocol 配置约束 |
 | `memory_get` | `id` 必填，支持完整 ID 或无歧义前缀；`scope` 默认 project，可显式 all；`includeExpired` 默认 false。直接返回当前记录，不做语义搜索 |
 | `memory_history` | `id` 必填；`limit` 默认 10，范围 1–50。返回 `{record, truncated, entries}`，正文历史从新到旧；更多历史使用 CLI `history <id>` |
 | `memory_search` 的 `explain` | 默认 false；true 时各结果增加 `scoreDetails`，展示语义、BM25 和实体贡献，不改变排序 |
+
+缺少历史背景时先以 `{}` 调用 `memory_context`，已有结果就复用；需要刷新或上下文压缩后丢失时可以重新调用。它不是任务检索，不取代 `memory_search`，也不保证 AI 一定执行。所有 MCP 宿主使用同一种短 instructions，不提供完整握手注入的兼容模式。
 
 例如调用 `memory_search` 时传入：
 
@@ -144,9 +148,9 @@ node scripts/test-hooks.mjs D:\UGit\HappyArenaTMR\HappyArena
 
 | 能力 | Cursor（桌面版 / CLI） | ACP 宿主（JetBrains 等） |
 | --- | --- | --- |
-| 会话开始注入本仓库记忆 | 两遍：`sessionStart` hook + MCP `instructions`（各不超过 `inject.maxChars`，确定主力宿主后可关掉一条） | 一遍：只有 MCP `instructions` |
+| 获取本仓库会话记忆 | sessionStart hook 可直接提供；MCP 按需 memory_context | 短 instructions 引导 AI 按需调用 memory_context |
 | 自动记录一轮对话 | **有**，三个 hook 合起来 | **没有**。这是唯一真正缺的能力，只能靠 AI 主动调 `memory_add` |
-| 8 个 `memory_*` 工具 | 有 | 有，完全一样 |
+| 9 个 `memory_*` 工具 | 有 | 有，完全一样 |
 | 认领没结束的轮次 | `sessionStart` + 下一条 prompt + MCP server 启动 | MCP server 启动（所以在这边泡一整天，Cursor 里丢下的那一轮也会被补写） |
 | 抽取模型、判重、重排、仓库隔离 | 同一套代码，宿主无关 | 同 |
 | 失效告警与每月清理 | Windows 计划任务，跑在 IDE 之外 | 同 |
@@ -171,7 +175,7 @@ node src/cli.mjs search "how to write a commit message" --top 5   # 不给 --top
 node src/cli.mjs search "how to run the tests" --kind convention  # 只在一个类别里搜，缩小发生在截断之前
 node src/cli.mjs search "10.BuildPC.bat" --explain   # 打印三路信号各贡献了多少
 node src/cli.mjs search "build script" --no-rerank   # 只看三路融合排序，对比重排效果
-node src/cli.mjs search "构建脚本"                   # 查询也要用英文：纯中文只有语义一路能跑，会在 stderr 上警告
+node src/cli.mjs search "构建脚本"                   # 建议改为英文查询；此查询会在 stderr 上提示语言风险
 node src/cli.mjs list --limit 20                     # 加 --expired 连过期的一起列
 node src/cli.mjs stats
 node src/cli.mjs audit                              # 只读报告元数据不一致、低可信、争议和验证过旧的记忆
@@ -206,7 +210,7 @@ node src/cli.mjs watch                               # 立刻巡检一次（加 
 | `dedupe.similarity` | 判为"说的是同一件事"的余弦阈值，默认 0.92 |
 | `prune.*` | 每月清理：`expiredGraceDays`（过期后再留多久才真删，默认 30）、`dayOfMonth`。前者在清理时才读，改了不用重新注册任务 |
 | `capture.*` | 自动记录的开关与过滤：长度上下限、跳过前缀、`kind`、是否提炼；以及按轮捕获的三个字段 `includeResponse` / `maxResponseChars` / `turnTimeoutMinutes` |
-| `inject.*` | 会话注入：总开关、两条通道各自的开关、`recent` 条数、`maxChars` 字符上限、`kinds` 白名单、`reserve`（哪些类别各占一个保底名额，其余名额按时间填）、`includeProtocol` |
+| `inject.*` | enabled 控制自动 hook/握手指导；hookContext 控制 hook，mcpInstructions 控制 MCP 短指导。显式 memory_context 仍可调用；recent、maxChars（记忆行预算，不含协议）、kinds、reserve 控制选择，includeProtocol 控制 hook/context 中的完整协议 |
 | `watchdog.*` | 失效告警：开关、巡检间隔、重复弹窗间隔、探活超时、是否弹窗 |
 | `telemetry` | 默认 `false`，已关闭 mem0 的匿名遥测 |
 
@@ -324,8 +328,8 @@ Remove-Item -Recurse $env:USERPROFILE\.mem0-local   # 如果连数据一起删
 - **自动记录的记忆要等这一轮结束才出现。** 一轮对话是记忆的单位，而 AI 的回答只有到 `stop` 才完整；这一轮被中断（关窗口、切走）就只记下 prompt 那一半，且要等下一条 prompt 或下一个会话才补写。想回到"发出即记录"就把 `capture.includeResponse` 关掉。
 - **AI 的回答只留尾部 `capture.maxResponseChars` 个字符**（默认 2000）。一轮的结论通常在最后，但一个把关键事实说在开头、之后又跑了几十次工具调用的回答，会只剩下后面那些无关的部分。
 - Cursor 的 `beforeSubmitPrompt` hook 官方**不支持注入上下文**，所以"每轮对话按当前问题自动检索"做不到确定性实现。检索发生在两处：会话开始时注入 + AI 主动搜索。开场协议要求不限类别的任务检索，仓库操作时补充相关 convention，设计原因按需查 decision；类别过滤不会自动放宽，理由见 [DESIGN.md](DESIGN.md#会话注入的两条通道)。
-- **ACP 宿主（JetBrains IDE 等）不执行 Cursor 的任何 hook**，Cloud Agents 也不加载用户级 `~/.cursor/hooks.json`。两边的会话注入都由 MCP `instructions` 覆盖，缺的是自动记录一轮对话，只能靠 AI 主动调 `memory_add`（逐项对照见[上面那张表](#两类宿主分别能拿到什么)）。
-- **注入通道被上游砍掉是唯一没被监控的失效**：cursor-agent 转发 MCP `instructions` 是实测行为、不是有契约的 API，真没了的话工具还在、巡检全绿，只有注入静默消失。
+- **ACP 宿主（JetBrains IDE 等）不执行 Cursor 的任何 hook**，Cloud Agents 也不加载用户级 `~/.cursor/hooks.json`。MCP instructions 只引导按需读取 memory_context，记忆不再随握手直接提供；自动记录仍依赖 hook，ACP 下只能主动 memory_add。
+- **AI 是否遵循入口指导不由巡检保证**：本地探活能检查工具和存储是否工作，不能证明宿主最终转发了指导或 AI 已调用 memory_context。工具描述也说明了使用时机；没有调用就没有会话记忆结果。
 - 首次运行下载嵌入模型（约 50MB），首次搜索再下载重排模型（约 87MB）。之后嵌入、检索、重排全部离线；开着总结模型时抽取那一步会出网到 Cursor。
 - **开着模型时，一条 prompt 可能一条记忆都不存**。mem0 会把已有记忆一起交给模型判断，认定"没有新事实"就返回空——这是去重生效，不是丢数据，日志里能看到 `stored=0`。模型跑偏（回复里没有 JSON）会被判为失败并回落原文存储，所以这两种情况不会混在一起。
 - **连着快发好几条长 prompt，可能出现近似重复的记忆**。每条 prompt 的抽取跑在各自的后台进程里、各约 15 秒；A 还没写完 B 已经在读"已有记忆"了。三道兜底（输入哈希、mem0 的内容哈希、语义判重）全都是"先查再写"，查的时候对方还没落库。删掉多余那条即可。

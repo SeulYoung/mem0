@@ -250,7 +250,7 @@ async function doctor() {
   const channels = config.inject.enabled
     ? [
         config.inject.hookContext === false ? null : "sessionStart hook",
-        config.inject.mcpInstructions === false ? null : "mcp instructions",
+        config.inject.mcpInstructions === false ? null : "mcp guidance (context on demand)",
       ].filter(Boolean)
     : [];
   out(`session injection   ${channels.length > 0 ? channels.join(" + ") : "off"}`);

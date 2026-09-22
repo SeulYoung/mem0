@@ -76,7 +76,7 @@ process.stdout.write("\n== probing a runtime for real\n");
 const heartbeatBefore = readHeartbeat()?.at ?? null;
 const healthy = await probeRuntime(process.execPath, { projectDir: repoRoot, timeoutMs: 90000 });
 check("this node can start the memory server", healthy.ok, healthy.ok ? `${healthy.tools} tools in ${healthy.ms}ms` : healthy.error);
-check("the handshake carries the memories", healthy.instructions?.includes("## Local memory (mem0-local)"));
+check("the handshake carries short context guidance", healthy.instructions?.includes("memory_context") && healthy.instructions.length <= 512);
 check("the store was readable", !healthy.instructions.includes("NOT WORKING"));
 // A probe that left a heartbeat would be forging evidence that a real session
 // worked, which is exactly what the watchdog is trusting.

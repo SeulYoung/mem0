@@ -21,7 +21,7 @@ const cachedModel = process.argv.slice(2).find((arg) => arg !== "--compat") ??
   path.join(os.homedir(), ".mem0-local", "models", model);
 let checks = 0;
 
-async function connect(directory, user = "read-test-user") {
+async function connect(directory, user = "read-test-user", home = path.join(root, "store")) {
   fs.mkdirSync(directory, { recursive: true });
   const client = new Client({ name: "read-test", version: "1.0.0" });
   clients.push(client);
@@ -29,7 +29,7 @@ async function connect(directory, user = "read-test-user") {
     command: process.execPath,
     args: [server, "--project-dir", directory],
     stderr: "pipe",
-    env: { ...process.env, MEM0_LOCAL_HOME: path.join(root, "store"), MEM0_LOCAL_USER_ID: user,
+    env: { ...process.env, MEM0_LOCAL_HOME: home, MEM0_LOCAL_USER_ID: user,
       MEM0_LOCAL_NO_LLM: "1", MEM0_LOCAL_NO_RERANK: "1", MEM0_LOCAL_PROBE: "1" },
   }));
   return client;
@@ -56,20 +56,50 @@ try {
   const two = await connect(path.join(root, "repo-two"));
   const otherUser = await connect(path.join(root, "repo-one"), "different-user");
   const catalog = (await one.listTools()).tools;
-  for (const name of ["memory_get", "memory_history"]) {
+  for (const name of ["memory_get", "memory_history", "memory_context"]) {
     assert.equal(catalog.find((t) => t.name === name)?.annotations?.readOnlyHint, true, name);
   }
   assert.ok(one.getInstructions().includes("without kind"));
+  assert.ok(one.getInstructions().includes("memory_context"));
+  assert.ok(one.getInstructions().length <= 512);
+  assert.ok(!one.getInstructions().includes("Memory protocol for this session:"));
+  const emptyContext = await call(one, "memory_context");
+  assert.equal(emptyContext.count, 0);
+  assert.ok(emptyContext.text.includes("No eligible memories"));
+  assert.ok(emptyContext.text.includes("Memory protocol for this session:"));
   checks += 1;
 
   const original = "dsdebug constructs dedicated server launch arguments in tools/dsdebug/server/task_manager.py::_build_argv and appends -StressTest.";
   const added = await call(one, "memory_add", { text: original, kind: "fact" });
   const id = added.ids[0];
   assert.equal(added.stored, 1);
+  const context = await call(one, "memory_context");
+  assert.equal(context.count, 1);
+  assert.ok(context.text.includes(original));
+  assert.equal(context.project, added.project);
+  assert.deepEqual(await call(one, "memory_context"), context, "context can be retrieved again");
+  assert.equal((await call(two, "memory_context")).count, 0);
+  assert.equal((await call(otherUser, "memory_context")).count, 0);
+  const later = await connect(path.join(root, "repo-one"));
+  assert.equal(later.getInstructions(), one.getInstructions(), "handshake must not grow with stored memories");
+  for (const tool of (await later.listTools()).tools) {
+    assert.ok(!JSON.stringify(tool).includes(original));
+    assert.ok(!tool.description.includes("Memory protocol for this session:"));
+  }
+  assert.ok((await call(later, "memory_context")).text.includes(original));
+  checks += 1;
   const record = await call(one, "memory_get", { id: id.slice(0, 8).toUpperCase() });
   assert.equal(record.id, id);
   assert.equal(record.text, original);
   assert.equal((await call(one, "memory_get", { id })).id, id);
+  const confirmed = await call(one, "memory_update", { id, evidence: "verified",
+    confidenceReason: "Verified fixture.", verifiedAt: "2024-01-01T00:00:00Z" });
+  const textOnly = await call(one, "memory_update", { id, text: original });
+  assert.equal(textOnly.verifiedAt, confirmed.verifiedAt);
+  assert.equal(textOnly.evidence, "verified");
+  await fails(one, "memory_update", { id, evidence: "verified" }, /confidenceReason/);
+  const reconfirmed = await call(one, "memory_update", { id, evidence: "verified", confidenceReason: "Reverified fixture." });
+  assert.notEqual(reconfirmed.verifiedAt, confirmed.verifiedAt);
   checks += 1;
 
   await fails(two, "memory_get", { id }, /No memory.*scope/);
@@ -98,6 +128,9 @@ try {
 
   const corrected = `${original} It also appends -DisableAutoStartTrace to prevent automatic tracing during stress tests.`;
   await call(one, "memory_update", { id, text: corrected });
+  const updatedContext = await call(one, "memory_context");
+  assert.ok(updatedContext.text.includes(corrected));
+  assert.notEqual(updatedContext.text, context.text, "context is not a startup snapshot");
   assert.equal((await call(one, "memory_get", { id })).text, corrected);
   const history = await call(one, "memory_history", { id: id.slice(0, 8) });
   assert.equal(history.record.text, corrected);
@@ -116,7 +149,7 @@ try {
   assert.equal(defaultHistory.entries.length, 10);
   assert.equal(defaultHistory.truncated, true);
   const fullHistory = await call(one, "memory_history", { id, limit: 50 });
-  assert.equal(fullHistory.entries.length, 12);
+  assert.equal(fullHistory.entries.length, 15);
   assert.equal(fullHistory.truncated, false);
   const refreshed = await call(one, "memory_search", searchArgs);
   assert.ok(refreshed.results.some((r) => r.id === id && r.text === corrected));
@@ -124,6 +157,7 @@ try {
   checks += 1;
 
   await call(one, "memory_update", { id, expiresAt: "2020-01-01" });
+  assert.equal((await call(one, "memory_context")).count, 0);
   await fails(one, "memory_get", { id }, /No memory.*scope/);
   assert.equal((await call(one, "memory_get", { id, includeExpired: true })).text, corrected);
   assert.equal((await call(two, "memory_get", { id, scope: "all", includeExpired: true })).id, id);
@@ -146,12 +180,52 @@ try {
   await fails(one, "memory_history", { id: prefix }, /matches.*use more characters/);
   await fails(one, "memory_update", { id: prefix, kind: "fact" }, /matches.*use more characters/);
   await fails(two, "memory_get", { id: prefix }, /No memory.*scope/);
+
+  // Old config switches control automatic delivery, not explicit read tools.
+  const disabledHome = path.join(root, "disabled-store");
+  fs.mkdirSync(disabledHome);
+  fs.writeFileSync(path.join(disabledHome, "config.json"), JSON.stringify({
+    embedder: { dimension: 384, dimensionModel: model },
+    inject: { enabled: false, mcpInstructions: false, includeProtocol: false },
+  }));
+  const disabled = await connect(path.join(root, "repo-one"), "read-test-user", disabledHome);
+  assert.ok(!disabled.getInstructions());
+  const explicitContext = await call(disabled, "memory_context");
+  assert.equal(explicitContext.count, 0);
+  assert.ok(!explicitContext.text.includes("Memory protocol for this session:"));
+  // A store can contain searchable facts even though its curated selection is empty.
+  const filteredHome = path.join(root, "filtered-store");
+  fs.mkdirSync(filteredHome);
+  fs.cpSync(cachedModel, path.join(filteredHome, "models", model), { recursive: true });
+  fs.writeFileSync(path.join(filteredHome, "config.json"), JSON.stringify({ inject: { kinds: [] } }));
+  const filtered = await connect(path.join(root, "repo-one"), "read-test-user", filteredHome);
+  const filteredWrite = await call(filtered, "memory_add", { text: original, kind: "fact" });
+  const filteredContext = await call(filtered, "memory_context");
+  assert.equal(filteredContext.count, 0);
+  assert.ok(filteredContext.text.includes("No eligible memories"));
+  assert.ok(!filteredContext.text.includes("No memories stored"));
+  assert.ok((await call(filtered, "memory_search", searchArgs)).results.some((r) => r.id === filteredWrite.ids[0]));
+  const duplicate = await call(filtered, "memory_add", { text: original });
+  assert.equal(duplicate.stored, 0);
+  assert.ok(!duplicate.note.includes("equivalent memory already exists"));
+  // distil requested with LLM disabled stores verbatim, rather than promising extraction.
+  const verbatim = await call(filtered, "memory_add", { text: corrected, distil: true, force: true });
+  assert.equal(verbatim.stored, 1);
+  assert.equal((await call(filtered, "memory_get", { id: verbatim.ids[0] })).text, corrected);
+
+  const brokenHome = path.join(root, "broken-store");
+  fs.mkdirSync(brokenHome);
+  fs.writeFileSync(path.join(brokenHome, "vectors.db"), "This is not a SQLite database.");
+  const broken = await connect(path.join(root, "repo-one"), "read-test-user", brokenHome);
+  assert.ok(broken.getInstructions().includes("NOT WORKING"));
+  assert.ok(broken.getInstructions().length <= 512);
+  await fails(broken, "memory_context", {}, /failed/);
   console.log(`PASS: ${checks} MCP read, history, filtering and isolation checks (real local embeddings; no reranking).`);
 
   if (process.argv.includes("--compat")) {
     const compatHome = path.join(root, "compat-store");
     fs.cpSync(cachedModel, path.join(compatHome, "models", model), { recursive: true });
-    for (const script of ["test-mcp.mjs", "test-cli.mjs"]) {
+    for (const script of ["test-mcp.mjs", "test-cli.mjs", "test-health.mjs"]) {
       await new Promise((resolve, reject) => {
         const child = spawn(process.execPath, [fileURLToPath(new URL(script, import.meta.url))], {
           cwd: path.dirname(server),

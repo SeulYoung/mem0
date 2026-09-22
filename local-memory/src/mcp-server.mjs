@@ -3,9 +3,6 @@
  * Local-only MCP server over stdio. Exposes the memory store in ~/.mem0-local
  * as tools the agent can call directly. Nothing leaves the machine.
  */
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -13,7 +10,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { ensureConfigFile } from "./config.mjs";
 import { describeChanges, fingerprint, readHeartbeat, recordToolFailure, writeHeartbeat } from "./health.mjs";
 import { flushStaleTurns } from "./hooks/_turn-store.mjs";
-import { buildInjectionText } from "./injection.mjs";
+import { buildInjectionText, MCP_INSTRUCTIONS } from "./injection.mjs";
 import { isNestedAgentInvocation, isNestedAgentWorkspace } from "./llm.mjs";
 import {
   addMemory,
@@ -60,6 +57,10 @@ async function runTool(name, args) {
   const project = currentProject();
 
   switch (name) {
+    case "memory_context": {
+      const built = await buildInjectionText({ project, config });
+      return { project: project.id, ...built };
+    }
     case "memory_search": {
       const results = await searchMemories({
         query: args.query,
@@ -100,10 +101,8 @@ async function runTool(name, args) {
         stored: stored.length,
         ids: stored.map((record) => record.id),
         project: project.id,
-        // Two ways to store nothing: this exact input has been through here before
-        // (the hash guard turns a replay away silently), or distil found no fact in
-        // it that an existing memory does not already carry.
-        ...(stored.length === 0 ? { note: "Nothing stored — an equivalent memory already exists." } : {}),
+        // No rows does not identify the cause: dedupe or extraction can yield none.
+        ...(stored.length === 0 ? { note: "Nothing stored: the input may be a duplicate, or extraction produced no new memories." } : {}),
       };
     }
     case "memory_list": {
@@ -135,29 +134,18 @@ async function runTool(name, args) {
   }
 }
 
-const CLI_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "cli.mjs");
-
 /**
  * When the store is unreadable the session is silently useless: a model with no
  * memories behaves exactly like a model that searched and found nothing, so
  * nobody notices. The instructions are the one channel that reaches the user in
  * that state, so spend them on saying so.
  */
-function degradedInstructions(error, changes) {
+function degradedInstructions(error) {
   return [
-    "## Local memory (mem0-local) — NOT WORKING",
-    "",
-    `The memory store could not be read when this session started: ${error.message}`,
-    "Nothing is being remembered or recalled right now.",
-    ...(changes.length > 0 ? ["", "The environment changed since memory last worked:", ...changes.map((c) => `- ${c}`)] : []),
-    "",
-    "Open your first reply with one short line telling the user that mem0-local is down and why,",
-    `then point them at: node "${CLI_PATH}" doctor`,
-    "",
-    // Deliberately not the usual protocol: telling an agent to search and store
-    // when the store is unreadable buys a run of failing tool calls, and it
-    // contradicts the paragraph above in the same breath.
-    "Do not call the memory tools until that is fixed — they read the same store and will fail.",
+    "Local memory — NOT WORKING. Tell the user the store could not be read at startup.",
+    `Reason: ${String(error.message).replace(/\s+/g, " ").slice(0, 140)}`,
+    'Run the adapter CLI "doctor" command; details are in the mem0-local log.',
+    "Do not use memory tools until the store is repaired, then reconnect.",
   ].join("\n");
 }
 
@@ -174,17 +162,18 @@ async function startUp() {
   const wanted = config.inject.enabled && config.inject.mcpInstructions !== false;
   let instructions;
   let store = "unchecked";
-  let memories = null;
+  const memories = null; // Startup checks storage; it no longer delivers memories.
 
   if (wanted) {
     try {
-      const built = await buildInjectionText({ project, config });
-      instructions = built.text;
-      memories = built.count;
+      // Preserve startup health detection without publishing or caching memory
+      // contents. Actual context is rendered fresh when the tool is called.
+      await listMemories({ project, limit: 1, scope: "project" });
+      instructions = MCP_INSTRUCTIONS;
       store = "ok";
-      log("mcp", `instructions built (memories=${built.count})`);
+      log("mcp", "store readable; short instructions ready (context is on demand)");
     } catch (error) {
-      instructions = degradedInstructions(error, changes);
+      instructions = degradedInstructions(error);
       store = "failed";
       log("mcp", `store unreadable at startup, warning the model instead: ${error.message}`);
     }
