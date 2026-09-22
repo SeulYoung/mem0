@@ -1,5 +1,5 @@
 /**
- * The six MCP tools, as schemas — which is to say: as prompt text. Apart from
+ * The MCP tools, as schemas — which is to say: as prompt text. Apart from
  * the injected protocol, this is everything a host tells the agent about the
  * memory layer, and nothing here runs anything.
  *
@@ -41,6 +41,12 @@ const MEMORY_ID = {
   type: "string",
   description:
     'Memory id from memory_search, memory_list, or the list injected at the start of this session. The shortened eight-character form shown there is enough. Must name a memory belonging to this repository — memories owned by another repository are readable with scope "all" but can only be changed from the repository that owns them.',
+};
+
+const READ_MEMORY_ID = {
+  type: "string",
+  minLength: 1,
+  description: "Full memory id or an unambiguous prefix, such as the eight characters shown in session context. Ambiguous prefixes are rejected; supply more characters.",
 };
 
 const EVIDENCE_DESCRIPTION =
@@ -96,11 +102,42 @@ export function memoryTools(config) {
             type: "string",
             enum: KINDS,
             description:
-              "Restrict the search to one category. Use it to ask a question the unfiltered search would answer with whatever is most similar overall: `convention` for what this repository expects of you, `decision` for why something is the way it is, `gotcha` for what breaks silently. Leave it out to search everything.",
+              "Strictly restrict the search to one category, with no automatic fallback. Omit kind for the initial task search across all categories. Use convention for operation-specific rules, decision for design reasons, or gotcha for silent failures. If results do not answer the question, explicitly omit kind on a new search to broaden categories.",
           },
           scope: SCOPE_READ,
+          explain: {
+            type: "boolean",
+            description: "Default false. Return scoreDetails for the semantic, BM25 and entity contributions without changing ranking. These are retrieval signals, not proof of an exact identifier match or factual correctness.",
+          },
         },
         required: ["query"],
+      },
+    },
+    {
+      name: "memory_get",
+      description: "Read a current memory by id without semantic search. Use before a correction or to check stored text after an important write. This confirms stored content, not search recall. Defaults to this repository and hides expired records.",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: READ_MEMORY_ID,
+          scope: SCOPE_READ,
+          includeExpired: { type: "boolean", description: "Default false. Include expired records when resolving the id, for inspection or revival." },
+        },
+        required: ["id"],
+      },
+    },
+    {
+      name: "memory_history",
+      description: "Read a memory's text change history, newest first, and its current record. Only this repository; expired records are supported, deleted records are not. This is text history, not a complete metadata audit. Returns truncated when more entries exist; use CLI history for the full history.",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: READ_MEMORY_ID,
+          limit: { type: "integer", minimum: 1, maximum: 50, description: "Maximum entries to return (default 10, maximum 50)." },
+        },
+        required: ["id"],
       },
     },
     {
@@ -169,7 +206,7 @@ export function memoryTools(config) {
           includeExpired: {
             type: "boolean",
             description:
-              "Also list memories whose expiry date has passed. They are hidden everywhere else, so this is the only way to find one and revive it with memory_update.",
+              "Also list memories whose expiry date has passed. Use this or memory_get with includeExpired to inspect one before reviving it with memory_update.",
           },
         },
       },

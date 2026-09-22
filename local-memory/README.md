@@ -22,7 +22,7 @@ Cursor / JetBrains 等 ACP 宿主（任意工程）
 │
 └── MCP server（~/.cursor/mcp.json）        供 AI 主动读写，并在握手时注入记忆
     ├── instructions        → 同一份记忆 + 协议，宿主无关
-    └── memory_search / memory_add / memory_list / memory_update / memory_delete / memory_stats
+    └── memory_search / memory_get / memory_history / memory_add / memory_list / memory_update / memory_delete / memory_stats
                     │
                     ▼
         mem0ai（npm 包）本地 OSS 模式
@@ -64,7 +64,7 @@ node src/cli.mjs doctor           # 自检
 
 然后**重启 Cursor**（或 Reload Window）。安装脚本只新增自己的条目，已有的 MCP server 和 hooks 都保留，且每次写入前自动备份为 `*.bak-<时间戳>`。
 
-验证：Cursor Settings → MCP 里能看到 `mem0-local` 的 6 个工具；Customize → Hooks 里能看到四个 hook（`sessionStart` 注入，`beforeSubmitPrompt` / `afterAgentResponse` / `stop` 合起来记录一轮对话）。想用总结模型还需要 Cursor CLI 处于登录状态（`cursor-agent status`）；不想用就把 `llm.enabled` 设成 `false`。
+验证：Cursor Settings → MCP 里能看到 `mem0-local` 的 8 个工具；Customize → Hooks 里能看到四个 hook（`sessionStart` 注入，`beforeSubmitPrompt` / `afterAgentResponse` / `stop` 合起来记录一轮对话）。想用总结模型还需要 Cursor CLI 处于登录状态（`cursor-agent status`）；不想用就把 `llm.enabled` 设成 `false`。
 
 用环境变量存 Cursor 凭据的话（`llm.apiKey` 默认就是 `env:CURSOR_API_KEY`），要设成用户级永久变量，重启 Cursor 后 hook 子进程才继承得到：
 
@@ -98,6 +98,28 @@ node scripts/test-hooks.mjs D:\UGit\HappyArenaTMR\HappyArena
 - AI 需要回忆过去时会调 `memory_search`（自动记录的对话也在检索范围内）。**查询也得是英文**：不含任何 ASCII 字母或数字的查询只有语义一路能跑，检索出来的其实是"哪条记忆的中文最多"，所以这种查询会带回一条 `warning`，说明这次排序是任意的（理由见 [DESIGN.md](DESIGN.md#检索的三路信号)）
 - 每条新记忆带一个证据等级，确定性映射成 `confidence`：`user_confirmed=1`、`verified=0.9`、`stated=0.7`、`inferred=0.4`、`disputed=0.2`。它表示**证据有多可靠**，不是它和某次查询有多相关；低于 `0.5` 的注入会明确标成 `VERIFY`，但不参与排序，也不会自己隐藏或删除记忆
 
+### 检索与维护接口
+
+开场先对当前任务的一个具体问题做不限类别的搜索；涉及构建、测试、编辑、提交等仓库操作时，并行检索该操作的 `convention`。需要设计原因时再查 `decision`。`kind` 始终是严格过滤，不自动回退；结果没有回答问题时，每次只改变一个因素再查，例如拆分问题、补充标识符、省略 kind 或扩大 topK。返回非空不等于已经找到有用答案。
+
+| 工具 | 参数与返回 |
+| --- | --- |
+| `memory_get` | `id` 必填，支持完整 ID 或无歧义前缀；`scope` 默认 project，可显式 all；`includeExpired` 默认 false。直接返回当前记录，不做语义搜索 |
+| `memory_history` | `id` 必填；`limit` 默认 10，范围 1–50。返回 `{record, truncated, entries}`，正文历史从新到旧；更多历史使用 CLI `history <id>` |
+| `memory_search` 的 `explain` | 默认 false；true 时各结果增加 `scoreDetails`，展示语义、BM25 和实体贡献，不改变排序 |
+
+例如调用 `memory_search` 时传入：
+
+```json
+{"query":"dsdebug _build_argv DS launch flags","topK":3,"explain":true}
+```
+
+然后用结果中的实际 ID 调用 `memory_get`；跨仓库读取需显式传 `scope: "all"`。跨仓库读取仍受当前用户隔离，不授予修改权限。短 ID 在请求可见范围内有多个匹配时会报错，需提供更多字符；找不到记录也会报错，默认隐藏过期记录。
+
+历史只允许本仓库，可读取过期记录，但不能通过工具读取已删除记录的历史；它保留正文变化，不是完整 metadata 审计。get 确认“已存储”，不能证明“已召回”。重要更新后可分别用一个标识符问题和一个自然语言问题回查；普通写入不会自动增加两次搜索。逐路分数也不是精确标识符命中或事实正确性的证明。
+
+隔离回归测试：在本目录运行 `node scripts/test-mcp-reads.mjs`，自动创建临时数据目录并复制已有英文模型缓存，完成后清理。可传模型缓存目录作为第一个参数；加 `--compat` 会在另一份临时库运行现有 MCP 和 CLI 测试。测试不调用 LLM，不开启重排，也不修改生产记忆库。
+
 ### 两条写入通道的分工
 
 记忆有两个来源，故意不一样：**hook 保证"一定会记"，MCP 保证"记得好"**（为什么要两条，见 [DESIGN.md](DESIGN.md#两路写入hook-与-mcp)）。
@@ -124,7 +146,7 @@ node scripts/test-hooks.mjs D:\UGit\HappyArenaTMR\HappyArena
 | --- | --- | --- |
 | 会话开始注入本仓库记忆 | 两遍：`sessionStart` hook + MCP `instructions`（各不超过 `inject.maxChars`，确定主力宿主后可关掉一条） | 一遍：只有 MCP `instructions` |
 | 自动记录一轮对话 | **有**，三个 hook 合起来 | **没有**。这是唯一真正缺的能力，只能靠 AI 主动调 `memory_add` |
-| 6 个 `memory_*` 工具 | 有 | 有，完全一样 |
+| 8 个 `memory_*` 工具 | 有 | 有，完全一样 |
 | 认领没结束的轮次 | `sessionStart` + 下一条 prompt + MCP server 启动 | MCP server 启动（所以在这边泡一整天，Cursor 里丢下的那一轮也会被补写） |
 | 抽取模型、判重、重排、仓库隔离 | 同一套代码，宿主无关 | 同 |
 | 失效告警与每月清理 | Windows 计划任务，跑在 IDE 之外 | 同 |
@@ -212,7 +234,7 @@ node src/cli.mjs watch                               # 立刻巡检一次（加 
 - **模型用量**：`llm-usage.json` 是当天计数；日志里 `[llm]` 行有每次调用的 `duration_ms` 和 token 明细
 - **失效告警**：`watchdog.json` 是上次巡检结论，`heartbeat.json` 是上次真实会话的环境指纹。计划任务叫 `mem0-local watchdog`（`schtasks /Query /TN "mem0-local watchdog"` 查，`install-watchdog.mjs --uninstall` 摘）。它为什么要主动起一次服务、以及它到底在防什么，见 [DESIGN.md 的「失效告警」](DESIGN.md#失效告警)
 - **过期清理**：`last-sweep.json` 是上次清理的时间与删除条数，`doctor` 里对应 `expired memories` 和 `monthly sweep` 两行。计划任务叫 `mem0-local sweep`，每月 1 号 03:30 跑 `prune --expired --yes`（`install-sweeper.mjs --uninstall` 摘掉，摘掉只是不再清理，不删任何东西）。为什么要清、为什么留 30 天反悔窗口，见 [DESIGN.md 的「记忆的更新与淘汰」](DESIGN.md#记忆的更新与淘汰)
-- **历史库文件**：`history.db`，只增不减（删记忆不会删历史）。`cli history <id>` 是它唯一的读法——`update` 改掉的旧正文只存在这里。要清理直接删文件，下次用到会重建；`vectors.db` 才是记忆本体。旧版本留下的 `history/` 目录（每个仓库一个文件）已经没人读了，可以整个删掉；代价是换 `agent_id` 之前写的那批记忆，`history` 命令查不到它们的变更行（会明确告诉你行在哪个目录里）
+- **历史库文件**：`history.db`，只增不减（删记忆不会删历史）。可用 `cli history <id>` 或 MCP `memory_history` 读取仍有当前记录的本仓库记忆；后者默认 10 条、最多 50 条。`update` 改掉的旧正文存在这里，metadata 不构成完整历史。要清理直接删文件，下次用到会重建；`vectors.db` 才是记忆本体。旧版本留下的 `history/` 目录（每个仓库一个文件）已经没人读了，可以整个删掉；代价是换 `agent_id` 之前写的那批记忆，`history` 命令查不到它们的变更行（会明确告诉你行在哪个目录里）
 - **迁移备份**：`migrate-to-agent-scope.mjs` / `rekey-project.mjs` 动手前会把 `vectors.db` 和 `vectors_entities.db` 复制成 `*.bak-<时间戳>`。确认结果没问题后自行删除，它们就是唯一的撤回手段
 
 自检脚本（前八个不调用模型，快且不花钱）：
@@ -301,7 +323,7 @@ Remove-Item -Recurse $env:USERPROFILE\.mem0-local   # 如果连数据一起删
 - **没有跨仓库的「全局记忆」。** 归属用的是 mem0 的 `agent_id`，一次查询只接受一个值，所以"本仓库 + 全局"一次读不出来；一条记忆归哪个仓库也是写入时定的，改归属得跑 `rekey-project.mjs`。理由和代价见 [DESIGN.md](DESIGN.md#仓库标识就是-mem0-的-agent_id)。真需要一条到处可见的偏好，就在用得到的仓库里各写一条。
 - **自动记录的记忆要等这一轮结束才出现。** 一轮对话是记忆的单位，而 AI 的回答只有到 `stop` 才完整；这一轮被中断（关窗口、切走）就只记下 prompt 那一半，且要等下一条 prompt 或下一个会话才补写。想回到"发出即记录"就把 `capture.includeResponse` 关掉。
 - **AI 的回答只留尾部 `capture.maxResponseChars` 个字符**（默认 2000）。一轮的结论通常在最后，但一个把关键事实说在开头、之后又跑了几十次工具调用的回答，会只剩下后面那些无关的部分。
-- Cursor 的 `beforeSubmitPrompt` hook 官方**不支持注入上下文**，所以"每轮对话按当前问题自动检索"做不到确定性实现。检索发生在两处：会话开始时注入 + AI 主动搜索。注入的协议文本不止提醒去搜，而是点名开场要跑哪两条按 `kind` 过滤的搜索（`convention` 和 `decision`）——照搬 mem0 自己插件的做法，理由见 [DESIGN.md](DESIGN.md#会话注入的两条通道)。
+- Cursor 的 `beforeSubmitPrompt` hook 官方**不支持注入上下文**，所以"每轮对话按当前问题自动检索"做不到确定性实现。检索发生在两处：会话开始时注入 + AI 主动搜索。开场协议要求不限类别的任务检索，仓库操作时补充相关 convention，设计原因按需查 decision；类别过滤不会自动放宽，理由见 [DESIGN.md](DESIGN.md#会话注入的两条通道)。
 - **ACP 宿主（JetBrains IDE 等）不执行 Cursor 的任何 hook**，Cloud Agents 也不加载用户级 `~/.cursor/hooks.json`。两边的会话注入都由 MCP `instructions` 覆盖，缺的是自动记录一轮对话，只能靠 AI 主动调 `memory_add`（逐项对照见[上面那张表](#两类宿主分别能拿到什么)）。
 - **注入通道被上游砍掉是唯一没被监控的失效**：cursor-agent 转发 MCP `instructions` 是实测行为、不是有契约的 API，真没了的话工具还在、巡检全绿，只有注入静默消失。
 - 首次运行下载嵌入模型（约 50MB），首次搜索再下载重排模型（约 87MB）。之后嵌入、检索、重排全部离线；开着总结模型时抽取那一步会出网到 Cursor。

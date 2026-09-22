@@ -661,6 +661,39 @@ export async function listMemories({ project, limit = 10, scope = "project", inc
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+function memoryIdQuery(id) {
+  const wanted = String(id ?? "").trim().toLowerCase();
+  if (!wanted) throw new Error("A memory id is required.");
+  return wanted;
+}
+
+function matchesMemoryId(record, wanted) {
+  return UUID.test(wanted) ? record.id.toLowerCase() === wanted : record.id.toLowerCase().startsWith(wanted);
+}
+
+function uniqueMemoryMatch(records, wanted) {
+  const matches = records.filter((record) => matchesMemoryId(record, wanted));
+  if (matches.length > 1) {
+    throw new Error(
+      `"${wanted}" matches ${matches.length} memories (${matches.map((m) => m.id.slice(0, 8)).join(", ")}); use more characters.`,
+    );
+  }
+  return matches[0];
+}
+
+/** Read only within the requested visibility; never turn a read into write authority. */
+export async function getMemory({ id, project, scope = "project", includeExpired = false }) {
+  const wanted = memoryIdQuery(id);
+  if (!["project", "all"].includes(scope)) throw new Error('scope must be "project" or "all".');
+  if (typeof includeExpired !== "boolean") throw new Error("includeExpired must be a boolean.");
+  const records = await listMemories({ project, limit: STORE_SCAN_LIMIT, scope, includeExpired });
+  const record = uniqueMemoryMatch(records, wanted);
+  if (record) return record;
+  throw new Error(
+    `No memory in scope "${scope}" has an id starting with "${wanted}"${includeExpired ? "." : "; expired records are hidden (use includeExpired: true)."}`,
+  );
+}
+
 /**
  * Resolve a caller-supplied id to the memory it names, refusing anything this
  * repository cannot already see.
@@ -677,28 +710,20 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
  * that read access into write access over the whole store.
  */
 async function resolveRecord(id, project) {
-  const wanted = String(id ?? "").trim().toLowerCase();
-  if (!wanted) throw new Error("A memory id is required.");
+  const wanted = memoryIdQuery(id);
   if (!project?.id) throw new Error("A repository is required to change a memory.");
-  const isMatch = (record) =>
-    UUID.test(wanted) ? record.id.toLowerCase() === wanted : record.id.toLowerCase().startsWith(wanted);
 
   // Expired memories are included: clearing an expiry is exactly the case where
   // you need to name one, and it is invisible everywhere else.
   const reachable = await listMemories({ project, limit: STORE_SCAN_LIMIT, scope: "project", includeExpired: true });
-  const matches = reachable.filter(isMatch);
-  if (matches.length === 1) return matches[0];
-  if (matches.length > 1) {
-    throw new Error(
-      `"${wanted}" matches ${matches.length} memories (${matches.map((m) => m.id.slice(0, 8)).join(", ")}); use more characters.`,
-    );
-  }
+  const match = uniqueMemoryMatch(reachable, wanted);
+  if (match) return match;
 
   // Nothing here — but "does not exist" and "belongs to someone else" call for
   // very different responses, so say which it is.
   const elsewhere = (
     await listMemories({ project, limit: STORE_SCAN_LIMIT, scope: "all", includeExpired: true })
-  ).filter(isMatch);
+  ).filter((record) => matchesMemoryId(record, wanted));
   if (elsewhere.length > 0) {
     const owner = elsewhere[0].projectName ?? elsewhere[0].project;
     throw new Error(
@@ -835,22 +860,28 @@ export async function updateMemory({
  * replaces the text in place, and without this the old wording is gone as far as
  * anyone can tell.
  *
- * The id is resolved against this repository exactly like an edit, even though
- * this only reads. History rows carry the memory id and nothing else — no
+ * The id is resolved against this repository, including expired records.
+ * History rows carry the memory id and nothing else — no
  * `agent_id` — so mem0 would happily return another repository's rows for a uuid
  * picked up from a `scope: "all"` search.
  */
-export async function historyMemory({ id, project }) {
-  const record = await resolveRecord(id, project);
+export async function historyMemory({ id, project, limit }) {
+  // CLI callers omit limit to keep the full history. MCP supplies a bounded
+  // limit explicitly; validate here too because tools/list is not validation.
+  if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 50)) {
+    throw new Error("history limit must be an integer between 1 and 50.");
+  }
+  const record = await getMemory({ id, project, includeExpired: true });
   const { memory } = await openMemory();
   const rows = (await memory.history(record.id)) ?? [];
   return {
     record,
+    ...(limit === undefined ? {} : { truncated: rows.length > limit }),
     // mem0 returns newest first (`ORDER BY id DESC`), which is also the only
     // reliable ordering here: the dates below do not say when the row was
     // written. `created_at` is the memory's own creation time, repeated on every
     // row; `updated_at` is set on UPDATE rows only; a DELETE row has neither.
-    entries: rows.map((row) => ({
+    entries: (limit === undefined ? rows : rows.slice(0, limit)).map((row) => ({
       action: row.action ?? null,
       previous: row.previous_value ?? null,
       next: row.new_value ?? null,

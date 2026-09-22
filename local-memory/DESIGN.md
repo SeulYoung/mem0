@@ -106,7 +106,7 @@ mem0 的事实抽取
 
 保底名额默认给 `convention` / `preference` / `decision`：前两个读起来就是指令，第三个解释了代码为什么长这样，三个都是"结构性偏老"的类别；`gotcha` 和 `fact` 通常伴随近期工作出现，本来就在时间序前排。**保底清单必须短。** 每个保底名额都是从"最近发生了什么"那里拿走的一格，而后者是时间排序唯一真正擅长的事；`mem0` 自己的插件在会话开始时也只点名两个类别（`on_session_start.sh` 要 `decision` 和 `task_learning`），其余全交给查询驱动的检索。库里没有某个保底类别的记忆时，那一格自动让回给时间序，所以一个只有 `note` 的仓库和改造之前完全一样。
 
-保底也只是把差距缩小，没有消除：一个仓库的约定远多于那一格。**注入不是全部记忆，AI 开工前仍要 `memory_search`**——协议文本里不只是提醒去搜，而是照 mem0 的形状点名了开场要跑的两条按 `kind` 过滤的搜索。理由是：只被要求"去搜"的 agent 会自己决定搜什么，而它会搜眼前的话题，绝不会搜自己正要违反的那条约定。ACP 宿主下这一点更要紧——那里没有任何逐轮 hook，除了 agent 自己没人能在有查询的时刻发起一次检索。实测一条排在第 15 位、根本没进注入的原则，用四种自然问法搜都稳定排第 1。
+保底也只是把差距缩小，没有消除：一个仓库的约定远多于那一格。**注入不是全部记忆，AI 开工前仍要 `memory_search`**。开场先做不限类别的任务检索，涉及仓库操作时并行查该操作的 convention，需要设计原因时再查 decision。只查固定两个类别会排除 fact 和 gotcha；只查任务又可能漏掉年代较久的约定，因此两种查询各有用途。kind 保持存储阶段的严格过滤，不做隐式回退；结果未回答问题时，调用方一次改变一个因素再查，不能仅凭结果非空认定命中。ACP 没有逐轮 hook，仍依赖 agent 发起这些查询。此前关于约定检索的实验中，一条排在第 15 位、未进注入的原则，用四种自然问法搜都排第 1；该历史实验并不等于新的开场流程已经经过效果评测。
 
 `inject.maxChars` 必须装得下 `recent` 条，否则小的那个上限说话、另一个是谎话（实测一条注入行 400–800 字符、均值约 530）。`scripts/test-injection.mjs` 守着这一整套：预算跳过超长记忆、两个上限不打架、保底名额能把窗口外的记忆捞进来、空的保底类别不白占格、保底不越过 `recent`、保底清单是白名单的子集（否则那一格永远填不上）、老 `config.json` 的迁移。不碰记忆库、毫秒级。
 
@@ -140,7 +140,7 @@ mem0 的事实抽取
 | ACP 宿主（JetBrains 里的 `cursor-agent acp`） | **一个都不跑** | 有 | 缺自动记录，其余齐全 |
 | Cloud Agents | 只认仓库里的 `.cursor/hooks.json`，用户级的不加载；`sessionStart` 本身也不支持 | 有 | 记忆库在本机，本就不适用 |
 
-**这个缺口只丢"一定会记"，不丢"记得好"。** ACP 宿主下 AI 依然拿得到会话注入和 6 个工具，所以它主动写下的高质量记忆一条不少；缺的是那条不依赖模型自觉的确定性通路。这也是为什么两路写入必须都存在：如果自动记录是唯一来源，换一个宿主就等于整套系统静默失效。
+**这个缺口只丢"一定会记"，不丢"记得好"。** ACP 宿主下 AI 依然拿得到会话注入和 8 个工具，所以它主动写下的高质量记忆一条不少；缺的是那条不依赖模型自觉的确定性通路。这也是为什么两路写入必须都存在：如果自动记录是唯一来源，换一个宿主就等于整套系统静默失效。
 
 **认领没结束的轮次因此做成了宿主无关的。** 按轮捕获把 prompt 暂存在 `~/.mem0-local/turns/` 里，而认领它的两个 hook（下一条 prompt、下一个 `sessionStart`）都只在 Cursor 跑。所以 MCP server 启动时也认领一次：每类宿主都会起它，于是"在 Cursor 里丢下半轮、然后一整天待在 CLion"这条路径不再是记忆静默少一条。probe 运行（`MEM0_LOCAL_PROBE=1`，巡检和测试走的那条）跳过这一步——让被测试驱动的路径去写真实记忆库，和让它去删一样不合适。
 
@@ -196,6 +196,14 @@ mem0 的事实抽取
 | 就地改正 | `memory_update`；`cli update <id> "新正文"` | 保留 id、`createdAt` 和它在注入列表里的位置，只刷新 `updatedAt`。删了重写这两样都会丢 |
 | 看出它被改过 | 检索与列表返回里的 `updatedAt`；`cli list/search` 的 `edited=` 列 | 保留原始 `createdAt` 的代价是**改过的记忆看起来比它陈述的事实旧**，而"这是什么时候写的"正是判断它是否过时的主要依据。mem0 在 `search`/`get`/`getAll` 里一直返回 `updatedAt`，只是本层的 `toRecord` 早先没抄过来 |
 | 设到期日 | `memory_update` 的 `expiresAt`；`cli add/update --expires` | 过期后 mem0 自己把它从 `search` 和 `getAll` 里滤掉，于是也不再进下一个会话的注入。这是本地唯一真正意义上的自动淘汰 |
+
+### MCP 读取与诊断
+
+`memory_get` 用公开 getAll 的可见记录解析完整或短 ID，复用列表的用户、仓库与过期过滤；一个前缀匹配多条就拒绝。查询范围默认 project，显式 all 才跨仓库。读取与修改共享 ID 匹配规则，但不共享权限：读到别的仓库记录，仍不能在当前仓库改删它。
+
+`memory_history` 复用 `historyMemory()`，在当前仓库内解析 ID，包含过期记录。mem0 的历史行没有仓库身份，因此必须先确认当前记录归属；已删除记录不受此接口支持。MCP 默认 10 条、最多 50 条，返回 truncated；CLI 不传 limit，保持完整输出。历史只描述正文变化，不能当作 metadata 审计。
+
+`memory_search.explain` 透传既有逐路分数，不改变排序或候选池。`scripts/test-mcp-reads.mjs` 使用独立临时库与真实本地嵌入，验证过滤、读取、历史、跨仓库/用户隔离和写权限；测试关闭 LLM 与重排，测的是接口行为，不是新的排名效果。
 
 ### 可信度是证据强度，不是第四种检索分
 
@@ -364,7 +372,7 @@ watchdog            all 3 runtime(s) ok 0m ago; scheduled task registered
 
 ### 提示词：只补 mem0 没说的
 
-本层一共 4 处提示词文本，读者不是同一个：`llm.customInstructions`（`src/config.mjs`，抽取模型读）、`MEMORY_PROTOCOL`（`src/injection.mjs`，和你对话的 AI 读）、6 个工具及参数的 `description`（`src/tools.mjs`，同上）、`# Response rules`（`src/llm.mjs` 的 `buildPrompt`，抽取模型读）。
+本层一共 4 处提示词文本，读者不是同一个：`llm.customInstructions`（`src/config.mjs`，抽取模型读）、`MEMORY_PROTOCOL`（`src/injection.mjs`，和你对话的 AI 读）、8 个工具及参数的 `description`（`src/tools.mjs`，同上）、`# Response rules`（`src/llm.mjs` 的 `buildPrompt`，抽取模型读）。
 
 **共用的句子只写一遍，放 `src/wording.mjs`。** 给 AI 的那两处要重述 mem0 的同一份约定，重述两遍就会各自漂移——实际发生过：两处只引了 `15-80 words` 而丢了优先级规则，`memory_update` 还比 mem0 少允许两句。所以长度规则、拆分出路、英文与标识符这四条句子是常量，由协议文本和工具 schema 组合，`memory_update` 则只**指向** `memory_add`（指向是唯一不可能漂移的形式）。给抽取模型的那两处**刻意不引用**这些常量：它们是追加在 mem0 提示词后面的，mem0 已经说过的话在那里只该出现一次——在 mem0 自己那份里。
 

@@ -109,10 +109,25 @@ const remove = tool("memory_delete");
 const stats = tool("memory_stats");
 
 check(
+  "opening searches cover the task without a category and retain operation-specific conventions",
+  MEMORY_PROTOCOL.includes("without kind") &&
+    MEMORY_PROTOCOL.includes('kind: "convention"') &&
+    MEMORY_PROTOCOL.includes("one factor") &&
+    !MEMORY_PROTOCOL.includes("Open every session with two"),
+);
+check(
+  "read diagnostics are discoverable without weakening write ownership",
+  tool("memory_get")?.inputSchema.properties.scope.enum.includes("all") &&
+    tool("memory_history")?.inputSchema.properties.limit.maximum === 50 &&
+    search.inputSchema.properties.explain?.type === "boolean" &&
+    [tool("memory_get"), tool("memory_history")].every((entry) => entry?.annotations?.readOnlyHint === true),
+);
+
+check(
   "read tools advertise closed-world, side-effect-free annotations",
-  [search, list, stats].every(
+  [search, list, stats, tool("memory_get"), tool("memory_history")].every(
     (entry) =>
-      entry.annotations?.readOnlyHint === true &&
+      entry?.annotations?.readOnlyHint === true &&
       entry.annotations?.destructiveHint === false &&
       entry.annotations?.idempotentHint === true &&
       entry.annotations?.openWorldHint === false,

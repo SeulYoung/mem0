@@ -21,14 +21,11 @@ export const MEMORY_PROTOCOL = [
   // Phrased so it stays true when nothing was injected at all, which is what
   // the empty-repository and budget-starved cases both produce.
   //
-  // Naming the two searches rather than asking for a search is mem0's own
-  // shape — its plugin's session-start hook says "Run 2 parallel searches: one
-  // for decision type, one for task_learning type". The reason to copy it is
-  // that an agent told only to search picks what to search for, and what it
-  // picks is the topic in front of it, never the convention it is about to
-  // break. In an ACP host this is also the only query-time retrieval there is:
-  // no hook fires per turn, so nothing but the agent can run one.
-  '- The list above is partial, so most of what this repository knows is reachable only by searching. Open every session with two `memory_search` calls before your first substantive answer — `kind: "convention"` for what this repository expects of you, `kind: "decision"` for why things are the way they are — and search again before following a convention you have not checked, and whenever the user refers to past work.',
+  // Task retrieval must reach facts and gotchas too. Keep a separate convention
+  // search when operating on a repository: task similarity alone can bury old
+  // rules. ACP hosts have no per-turn hooks, so the agent must issue these calls.
+  '- The list above is partial. Before your first substantive answer, use `memory_search` without kind for one specific question about the current task. For repository operations, also search with `kind: "convention"` for the rules relevant to that operation (building, testing, editing or committing); these searches can run in parallel. Use `kind: "decision"` when you need the reason behind a design. Search again before following an unchecked convention and whenever the user refers to past work.',
+  '- If results do not answer the question, change one factor and search again: split a mixed-intent question, add an identifier, omit kind to broaden categories, or raise topK. Nonempty results do not prove a useful match. kind is a strict filter, with no automatic fallback; omit it explicitly to search across categories.',
   // mem0's own rules, restated because the default write path is verbatim and
   // never runs the prompt that states them. See `wording.mjs`.
   `- Call \`memory_add\` when you learn something durable: a user preference, a project convention, a decision and its reason, or a non-obvious pitfall. ${MEMORY_LENGTH} ${SPLIT_NOT_COMPRESS}`,

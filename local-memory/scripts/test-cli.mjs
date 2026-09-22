@@ -125,7 +125,7 @@ try {
   check("--limit is honoured", (listed.match(/^[0-9a-f]{8}\s/gm) ?? []).length === 1);
 
   const stats = JSON.parse(cli("stats"));
-  check("stats reports the local store", stats.dataDir?.includes(".mem0-local") && stats.total >= 1);
+  check("stats reports the configured local store", stats.dataDir === PATHS.home && stats.total >= 1);
 
   const lowBody = `${MARKER}：这条推断只用于验证可信度审计。`;
   cli("add", lowBody, "--evidence", "inferred", "--reason", "Inferred only for the audit fixture.");

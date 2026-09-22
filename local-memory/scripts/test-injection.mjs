@@ -184,8 +184,8 @@ check(
   MEMORY_PROTOCOL.includes("memory_search") && MEMORY_PROTOCOL.includes("memory_add"),
 );
 check(
-  "the protocol names the searches to run rather than asking for a search",
-  MEMORY_PROTOCOL.includes('kind: "convention"') && MEMORY_PROTOCOL.includes('kind: "decision"'),
+  "the protocol separates cross-category task retrieval from operation-specific rules",
+  MEMORY_PROTOCOL.includes("without kind") && MEMORY_PROTOCOL.includes('kind: "convention"'),
 );
 check(
   "the protocol distinguishes evidence confidence from retrieval relevance",

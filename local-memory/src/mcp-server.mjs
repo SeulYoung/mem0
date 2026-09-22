@@ -18,6 +18,8 @@ import { isNestedAgentInvocation, isNestedAgentWorkspace } from "./llm.mjs";
 import {
   addMemory,
   deleteMemory,
+  getMemory,
+  historyMemory,
   listMemories,
   queryReachWarning,
   routeConsoleToStderr,
@@ -65,12 +67,22 @@ async function runTool(name, args) {
         topK: args.topK ?? null,
         scope: args.scope ?? "project",
         kind: args.kind ?? null,
+        explain: args.explain === true,
       });
       // Ahead of the results rather than beside them: an agent that reads the
       // hits first has already started trusting an arbitrary ordering.
       const warning = queryReachWarning(args.query);
       return { project: project.id, ...(warning ? { warning } : {}), count: results.length, results };
     }
+    case "memory_get":
+      return getMemory({
+        id: args.id,
+        project,
+        scope: args.scope ?? "project",
+        includeExpired: args.includeExpired ?? false,
+      });
+    case "memory_history":
+      return historyMemory({ id: args.id, project, limit: args.limit === undefined ? 10 : args.limit });
     case "memory_add": {
       const stored = await addMemory({
         text: args.text,

@@ -24,6 +24,7 @@
     "smoke": "node scripts/smoke-test.mjs",
     "test:health": "node scripts/test-health.mjs",
     "test:mcp": "node scripts/test-mcp.mjs",
+    "test:mcp-reads": "node scripts/test-mcp-reads.mjs",
     "test:hooks": "node scripts/test-hooks.mjs",
     "test:llm": "node scripts/test-llm.mjs",
     "test:injection": "node scripts/test-injection.mjs",

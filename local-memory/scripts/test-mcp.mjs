@@ -31,7 +31,9 @@ async function connect(env) {
       stderr: "inherit",
       // Inherited by anything the server spawns, which is how the detached
       // capture worker below is reached.
-      ...(env ? { env: { ...process.env, ...env } } : {}),
+      // SDK defaults inherit only a small OS allowlist, not MEM0_LOCAL_HOME.
+      // Always propagate the test store, including connections with no overrides.
+      env: { ...process.env, ...env },
     }),
   );
   return client;
@@ -57,7 +59,7 @@ show(
   tools.map((tool) => ({ name: tool.name, annotations: tool.annotations })),
 );
 const tool = (name) => tools.find((entry) => entry.name === name);
-for (const name of ["memory_search", "memory_list", "memory_stats"]) {
+for (const name of ["memory_search", "memory_get", "memory_history", "memory_list", "memory_stats"]) {
   const annotations = tool(name)?.annotations;
   if (
     annotations?.readOnlyHint !== true ||
@@ -348,8 +350,7 @@ if (!unreachable.warning) throw new Error("a CJK-only query came back with no wa
 const reachable = await call("memory_search", { query: "where does the local memory layer live", topK: 3 });
 if (reachable.warning) throw new Error(`an English query was warned about: ${reachable.warning}`);
 
-// The kind filter is what makes the injected protocol's two opening searches
-// possible, and it has to narrow inside mem0's store rather than after the cut —
+// Explicit kind searches must narrow inside mem0's store rather than after the cut —
 // so what it must never do is hand back a memory of another kind.
 //
 // The fixture is the control, and by now it is a `decision`: the memory_update
