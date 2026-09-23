@@ -33,9 +33,9 @@ For example, send this argument object to `memory_search`:
 {"query":"dsdebug _build_argv DS launch flags","topK":3,"explain":true}
 ```
 
-Then pass an actual returned ID to `memory_get` or `memory_history`. `scoreDetails` exposes semantic, BM25 and entity contributions; it does not certify an exact identifier match or factual correctness, and enabling it does not change ordering.
+Search returns full text and metadata. Reuse recent full records from search/list/get/history before edits; use `memory_get` only when the record is missing, incomplete or possibly stale. Do not routinely re-read search hits. Use `memory_history` for text changes. `scoreDetails` exposes semantic, BM25 and entity contributions; it does not certify an exact identifier match or factual correctness, and enabling it does not change ordering.
 
-For important corrections, inspect the current record, update it, and optionally check recall with an identifier query and a natural-language query. The update tool already reads the persisted record back. Ordinary writes do not automatically run these extra searches. A successful direct read confirms storage, not retrieval quality.
+Inspect the target record before a correction. The update tool reads storage back: check its returned record and use `memory_get` only if incomplete or possibly stale. A direct read confirms stored content; verify factual claims against current evidence. To assess recall quality, optionally use an identifier query and a natural-language query; ordinary writes need no extra searches.
 
 ## Writing and interpreting results
 

@@ -71,7 +71,7 @@ export function memoryTools(config) {
     {
       name: "memory_search",
       description:
-        "Search stored memories for the current task or past work. Results are leads to verify, not proof of correctness. If unhelpful, change one factor: split the query, add an identifier, omit kind or raise topK.",
+        "Search stored memories for the current task or past work. Returns full text and metadata; reuse recent results before edits. Verify claims against current evidence. If unhelpful, change one factor: split the query, add an identifier, omit kind or raise topK.",
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -112,7 +112,7 @@ export function memoryTools(config) {
     },
     {
       name: "memory_get",
-      description: "Read a current memory by id without semantic search. Use before a correction or to check stored text after an important write. This confirms stored content, not search recall. Defaults to this repository and hides expired records.",
+      description: "Read a memory by id when its record is missing, incomplete or possibly stale. Reuse recent full records from search/list/get/history; do not routinely re-read search hits. For write verification, use when the write result lacks the needed fields. Defaults to this repository and hides expired records.",
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         type: "object",
@@ -211,7 +211,7 @@ export function memoryTools(config) {
     {
       name: "memory_update",
       description:
-        "Correct a memory in place, preserving ID, creation time and text history. Omitted fields stay unchanged: text-only edits retain old evidence and verifiedAt, so reassess them. Supply at least one change. Returns the persisted record.",
+        "Correct a memory in place after inspecting it; a recent full read suffices. Preserves ID, creation time and text history. Omitted fields stay unchanged: text-only edits retain old evidence and verifiedAt, so reassess them. Supply at least one change. Checks storage by reading back; inspect the returned record and use memory_get only if incomplete or possibly stale.",
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
