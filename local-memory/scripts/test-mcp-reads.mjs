@@ -1,8 +1,10 @@
 #!/usr/bin/env node
-/** Real MCP and mem0 reads in a disposable store. No LLM or ranking benchmark.
+/** Real MCP and mem0 reads in a disposable store. No live LLM or ranking benchmark.
  * Uses a copy of the cached English embedding model; never writes production data.
- * node scripts/test-mcp-reads.mjs [path-to-fast-bge-small-en-v1.5-cache] [--compat]
+ * node scripts/test-mcp-reads.mjs [path-to-fast-bge-small-en-v1.5-cache] [--compat | --sdk]
  * --compat also runs the existing MCP and CLI suites in a second empty store.
+ * --sdk adds prompt, injection, retrieval/reranker and stub extraction checks.
+ * It copies the sibling transformers cache and never calls the live LLM.
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -17,7 +19,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "mem0-read-test-"));
 const clients = [];
 const server = fileURLToPath(new URL("../src/mcp-server.mjs", import.meta.url));
 const model = "fast-bge-small-en-v1.5";
-const cachedModel = process.argv.slice(2).find((arg) => arg !== "--compat") ??
+const cachedModel = process.argv.slice(2).find((arg) => !["--compat", "--sdk"].includes(arg)) ??
   path.join(os.homedir(), ".mem0-local", "models", model);
 let checks = 0;
 
@@ -222,21 +224,35 @@ try {
   await fails(broken, "memory_context", {}, /failed/);
   console.log(`PASS: ${checks} MCP read, history, filtering and isolation checks (real local embeddings; no reranking).`);
 
-  if (process.argv.includes("--compat")) {
+  const sdkChecks = process.argv.includes("--sdk");
+  if (process.argv.includes("--compat") || sdkChecks) {
     const compatHome = path.join(root, "compat-store");
+    const sdkHome = path.join(root, "sdk-store");
     fs.cpSync(cachedModel, path.join(compatHome, "models", model), { recursive: true });
-    for (const script of ["test-mcp.mjs", "test-cli.mjs", "test-health.mjs"]) {
+    if (sdkChecks) {
+      const cachedReranker = path.join(path.dirname(cachedModel), "transformers");
+      assert.ok(fs.existsSync(cachedReranker), `Reranker cache missing: ${cachedReranker}`);
+      // Earlier suites detect dimensions with reranking disabled, which can
+      // persist that effective setting. Keep model checks in a fresh store.
+      fs.cpSync(cachedModel, path.join(sdkHome, "models", model), { recursive: true });
+      fs.cpSync(cachedReranker, path.join(sdkHome, "models", "transformers"), { recursive: true });
+    }
+    const scripts = ["test-mcp.mjs", "test-cli.mjs", "test-health.mjs"];
+    if (sdkChecks) scripts.push("test-prompts.mjs", "test-injection.mjs", "test-retrieval.mjs", "test-llm.mjs");
+    for (const script of scripts) {
+      const scriptHome = ["test-retrieval.mjs", "test-llm.mjs"].includes(script) ? sdkHome : compatHome;
       await new Promise((resolve, reject) => {
         const child = spawn(process.execPath, [fileURLToPath(new URL(script, import.meta.url))], {
           cwd: path.dirname(server),
           stdio: "inherit",
-          env: { ...process.env, MEM0_LOCAL_HOME: compatHome, MEM0_LOCAL_USER_ID: "compat-test-user",
-            MEM0_LOCAL_NO_LLM: "1", MEM0_LOCAL_NO_RERANK: "1", MEM0_LOCAL_PROBE: "0" },
+          env: { ...process.env, MEM0_LOCAL_HOME: scriptHome, MEM0_LOCAL_USER_ID: "compat-test-user",
+            MEM0_LOCAL_NO_LLM: "1", MEM0_LOCAL_NO_RERANK: script === "test-retrieval.mjs" ? "0" : "1",
+            MEM0_LOCAL_PROBE: "0" },
         });
         child.on("error", reject);
         child.on("exit", (code) => {
           if (code === 0) return resolve();
-          const logFile = path.join(compatHome, "logs", "mem0-local.log");
+          const logFile = path.join(scriptHome, "logs", "mem0-local.log");
           if (fs.existsSync(logFile)) console.error(fs.readFileSync(logFile, "utf8").split("\n").slice(-15).join("\n"));
           reject(new Error(`${script} exited ${code}`));
         });

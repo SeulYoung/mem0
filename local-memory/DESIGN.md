@@ -506,9 +506,9 @@ A 组是关键：英文注解那部分自己就把 BM25 和实体两路都点着
 
 ### 上游 mem0 的已知问题
 
-截至 mem0 v3.2.0，OSS 增删改查全链路仍有以下已知问题。这些都在上游，本层没有绕过；列在这里是为了别把它们当成本层的 bug，也为了将来升级时知道该回头看什么。
+截至 mem0 v3.3.1，OSS 增删改查全链路仍有以下已知问题。这些都在上游，本层没有绕过；列在这里是为了别把它们当成本层的 bug，也为了将来升级时知道该回头看什么。
 
-升级审查：`git diff ts-v3.1.8 ts-v3.2.0 -- mem0-ts` 仅涉及 5 个文件，`src/oss/` 没有变化。新增的 `MEM0_SOURCE` / `MEM0_APPLICATION` / `MEM0_CLIENT_STACK` 请求头及 `SearchMemoryOptions.source` 属于托管平台的 `MemoryClient`，本层使用 `mem0ai/oss` 的 `Memory`，无需接入，也不会改变本地检索或抽取。上游同时更新了工作区的安全依赖约束；这些工作区 overrides 不会自动成为本层的 npm overrides。本次本层锁文件仅更新 mem0ai，自身传递依赖未变。下列 OSS 限制仍需保留。
+本次升级审查见下节。3.2.0 → 3.3.1 的 OSS 生产代码仅修改配置合并、PGVector 和 Turbopuffer；`Memory` 主流程、本地 SQLite store、分词、实体索引、重排和抽取提示词均未改变，所以下列限制仍需保留。表中的历史测量不是本次重新跑过的质量基准。
 
 | 问题 | 影响 |
 | --- | --- |
@@ -523,6 +523,27 @@ A 组是关键：英文注解那部分自己就把 BM25 和实体两路都点着
 | BM25 缺少中文分词 | 混合文本通常只保留 ASCII 词元；纯非 ASCII 文本回退原文并按空白切分，可能整句成为一个 token。字面相同内容仍可能命中，不能概括为永不命中 |
 | 每次读都是全表扫描 | `search` / `list` / `keywordSearch` 都是 `SELECT * FROM vectors` 再逐行 JSON.parse。万级以内无感 |
 | `vectorStore.list` 没有 `ORDER BY`，而 `getAll` 用 `slice(0, topK)` 截断 | 全表扫描按插入顺序返回，所以任何小于集合规模的 `topK` 截到的都是**最旧**的那批。本层所有读取因此一律向 mem0 要整个集合，排序和截断自己做——否则注入会停在旧记忆上、判重看不见新记忆、短 id 也解析不到新记忆，而且全程不报错 |
+
+### SDK 3.3.1 升级审查（2026-09-29）
+
+范围：`8df93aec..a3115596`，即此次合并新增的 26 个非合并上游提交；TypeScript SDK 修改 14 个文件。运行时使用 npm registry 的 `mem0ai@3.3.1`，不链接本仓库的 `mem0-ts/dist`。Python SDK 同时发布 2.2.1，但本层只使用 JavaScript OSS。
+
+| 提交 / 能力 | 对 local-memory 的结论 |
+| --- | --- |
+| `989c7da0`：非 OpenAI provider 不再被注入 OpenAI 的默认 model/baseURL | 直接随 SDK 升级生效。现有 LangChain 对象桥和显式 OpenAI 配置继续适用，不需改 `config.json`。这没有新增本层支持的 provider，也不意味着可删除 OpenAI 分支的显式参数。 |
+| `947ac798`：PGVector 懒加载，`pg`、`@types/pg`、`natural` 改为可选 peer；`@types/jest` 移到开发依赖 | 本地 `memory` store 不再因缺少 PostgreSQL 驱动而无法导入 SDK。此次安装移除了 44 个依赖包，已有 `natural`/`pg` 仍保留为可选依赖，不能声称它们已被全部移除。 |
+| `ea9bbcab`：User Profiles v1 | `MemoryClient` 新增 profile 读取、生成、任务查询及设置方法，调用 `/v2/` 托管端点；OSS `Memory` 没有对应方法。不能直接替代本层 `memory_context`，若采用会引入托管平台依赖，本次不接入。 |
+| `545306db`、`5fd01d28`：Turbopuffer 完整过滤操作符及欧氏距离分数修复 | 只影响该远端 vector store；本层固定使用 SQLite-backed `memory` provider，当前无收益。不能据此认为 SQLite 的过滤、排序或检索分数问题已修复。 |
+| `8c02c425`：agent-plugin 提示词统一、自动召回标题可配置 | 可借鉴“工具描述与实际行为一致”的做法；本层已有 `wording.mjs`、`tools.mjs` 和提示词/行为测试。上游共享插件生命周期不是 OSS SDK 新 API；引入它会改变本层已有注入方式，本次不替换。 |
+| `43849c6e`：Hermes 插件；其余 Python provider、context manager、ADD 返回值修复 | 是其他集成或 Python SDK 的改动，不会随 npm 包升级进入本层。 |
+
+**关键词检索的兼容性注意点：** `natural` 可选并不等于 BM25 被移除。3.2.0 和 3.3.1 的发布 ESM bundle 都通过 `__require("natural")` 尝试加载 Porter stemmer，纯 ESM 下失败后使用内置 `simpleStem`；因此不能仅安装 `natural` 就承诺完整 Porter 分词，更不能把此行为视为本次新增回归。保留 SDK 自身 fallback，不注入全局 `require` 或修改内部实现。
+
+**配置结论：** 将依赖下限与锁定安装包更新到 3.3.1；保留 `onnxruntime-node@1.24.3` override，使 fastembed 与 transformers 共用同一份原生运行时。检索阈值、候选数量、英文存储策略、数据库路径和 MCP 配置无需变化。没有新增可直接接入本地 OSS 的用户画像、中文分词、时间衰减或关联记忆 API。
+
+升级验证入口为 `npm run test:sdk`：在临时库中使用真实本地嵌入与重排、stub 抽取，覆盖 MCP 读取/历史/隔离、CLI、健康探测、提示词、注入预算、三路检索、判重及到期日。真实 Cursor CLI 模型调用不在这套离线验证内。
+
+本次在 Node 24.12.0、发布包 3.3.1 下整套检查通过，包含 29 项 MCP 读取/隔离检查和 23 项健康检查。检索用例实际得到非零 semantic、BM25、entity 三路分数；重排实际执行，答案与干扰项的 `rerankScore` 分别约为 0.974 和 0.000013。该用例中重排前后的顺序相同，因此它验证接入与分数，不证明本次升级提高了召回质量。模型检查使用独立临时库，避免之前关闭重排的测试配置导致重排检查跳过。
 
 **本层对 mem0 运行时的 4 处外部影响**（均不改变其逻辑）：
 

@@ -25,6 +25,7 @@
     "test:health": "node scripts/test-health.mjs",
     "test:mcp": "node scripts/test-mcp.mjs",
     "test:mcp-reads": "node scripts/test-mcp-reads.mjs",
+    "test:sdk": "node scripts/test-mcp-reads.mjs --sdk",
     "test:hooks": "node scripts/test-hooks.mjs",
     "test:llm": "node scripts/test-llm.mjs",
     "test:injection": "node scripts/test-injection.mjs",
@@ -40,7 +41,7 @@
     "@modelcontextprotocol/sdk": "^1.25.4",
     "better-sqlite3": "^12.6.2",
     "fastembed": "^2.1.0",
-    "mem0ai": "^3.2.0"
+    "mem0ai": "^3.3.1"
   },
   "overrides": {
     "onnxruntime-node": "1.24.3"

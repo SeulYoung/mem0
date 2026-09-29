@@ -300,11 +300,15 @@ node src/cli.mjs list --limit 5                 # 验证：能列出来就说明
 **升级 mem0 记忆引擎本身**（与本仓库无关，走 npm）：
 
 ```powershell
-npm install mem0ai@latest      # 或指定版本
-node scripts/smoke-test.mjs    # 验证；异常就 npm install mem0ai@3.1.7 回退
+npm install mem0ai@^3.3.1      # 本次审查的版本；后续升级先指定目标版本
+npm run test:sdk              # 临时库验证 MCP、CLI、检索、重排和 stub 抽取
 ```
 
-`package.json` 里声明的是 `mem0ai@^3.2.0`，锁文件固定安装 3.2.0；跨大版本升级前先看上游 migration guide，尤其注意存储格式与 `search`/`getAll` 的参数约定，以及 [DESIGN.md 的「上游 mem0 的已知问题」](DESIGN.md#上游-mem0-的已知问题)那张表里还成不成立。
+`package.json` 里声明的是 `mem0ai@^3.3.1`，锁文件固定安装 3.3.1。2026-09-29 的升级从 3.2.0 到 3.3.1，不需要迁移数据库或修改现有 `config.json`，也不需要重建向量。更新安装包后重新连接 MCP 或开启新会话，让新进程加载新版；已经运行的进程仍持有旧模块。
+
+`test:sdk` 使用临时 `MEM0_LOCAL_HOME`，复制本机的英文嵌入和重排模型缓存，禁用真实 LLM；不会写入正式记忆库。默认缓存来自 `~/.mem0-local/models/`；也可运行 `node scripts/test-mcp-reads.mjs <英文模型缓存目录> --sdk`，其同级须有 `transformers/`。升级前保留依赖声明和锁文件；需要回退本次升级时，将 `mem0ai` 恢复到 3.2.0 并重新运行同一套检查。
+
+跨大版本升级前先看上游 migration guide，尤其注意存储格式与 `search`/`getAll` 的参数约定，以及 [DESIGN.md 的「上游 mem0 的已知问题」](DESIGN.md#上游-mem0-的已知问题)那张表里还成不成立。本次提交审查与可利用功能见 [SDK 3.3.1 升级审查](DESIGN.md#sdk-331-升级审查2026-09-29)。
 
 ⚠️ **升级 `fastembed` 或 `@huggingface/transformers` 之后，先确认 `overrides` 里的 `onnxruntime-node` 仍然对两者都成立**（两个原生 ONNX 运行时共存会让进程直接崩掉，没有任何 JavaScript 异常，原因见 [DESIGN.md 的「第四路：重排」](DESIGN.md#第四路重排)末尾）：
 
