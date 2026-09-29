@@ -186,7 +186,6 @@ If the user is on a pre-current major (Python < 2, TS < 3, or a Platform call st
 ## Core Concepts
 
 - [How Mem0 Works](https://docs.mem0.ai/core-concepts/how-it-works) [Both]: Use when explaining the end-to-end pipeline: extraction (ADD-only distillation), storage across vector/entity/history stores, and multi-signal retrieval.
-- [Memory Types](https://docs.mem0.ai/core-concepts/memory-types) [Both]: Use when checking which `memory_type` values actually work: `procedural_memory` is implemented, `semantic_memory` and `episodic_memory` are defined in the enum but rejected by validation.
 - [Memory Operations - Add](https://docs.mem0.ai/core-concepts/memory-operations/add) [Both]: Use when explaining how `add()` extracts facts, resolves conflicts, and writes to both stores.
 - [Memory Operations - Search](https://docs.mem0.ai/core-concepts/memory-operations/search) [Both]: Use when explaining how queries are processed and ranked.
 - [Memory Operations - Update](https://docs.mem0.ai/core-concepts/memory-operations/update) [Both]: Use when memories need to be edited in place or reconciled against new info.
@@ -198,6 +197,7 @@ If the user is on a pre-current major (Python < 2, TS < 3, or a Platform call st
 ### Features - Essential
 - [V2 Memory Filters](https://docs.mem0.ai/platform/features/v2-memory-filters) [Platform]: Use when compound filters (AND/OR on metadata, entity, time) are needed at search.
 - [Entity-Scoped Memory](https://docs.mem0.ai/platform/features/entity-scoped-memory) [Platform]: Use when partitioning memories by user, agent, app, or run.
+- [Profiles](https://docs.mem0.ai/platform/features/user-profiles) [Platform]: Use when a structured always-current summary of a user is needed in one read, instead of searching their memories.
 - [Graph Memory](https://docs.mem0.ai/platform/features/graph-memory) [Platform]: Use when connecting facts across memories through shared entities for entity-centric or multi-hop questions.
 - [Async Client](https://docs.mem0.ai/platform/features/async-client) [Platform]: Use when the app issues many concurrent Mem0 calls and needs non-blocking I/O.
 - [Multimodal Support](https://docs.mem0.ai/platform/features/multimodal-support) [Platform]: Use when storing images or PDFs as memory input.
@@ -256,7 +256,7 @@ If the user is on a pre-current major (Python < 2, TS < 3, or a Platform call st
 - [Agno](https://docs.mem0.ai/integrations/agno) [Platform]: Use when the user is on Agno.
 - [Camel AI](https://docs.mem0.ai/integrations/camel-ai) [Both]: Use when the user is on Camel AI.
 - [ChatDev](https://docs.mem0.ai/integrations/chatdev) [Platform]: Use when the user is on ChatDev.
-- [Hermes](https://docs.mem0.ai/integrations/hermes) [Both]: Use when the user is on Hermes.
+- [Hermes](https://docs.mem0.ai/integrations/hermes) [Both]: Use when installing or configuring the standalone Hermes memory plugin, or migrating from the bundled Mem0 provider.
 - [Pi Agent](https://docs.mem0.ai/integrations/pi-agent) [Platform]: Use when adding automatic capture, prompt recall, scoped memory, and six memory commands to Pi Agent.
 - [DeepSeek Harness](https://docs.mem0.ai/integrations/deepseek-plugin) [Platform]: Use when adding automatic recall, completed-turn capture, and native search/add tools to DeepSeek Harness.
 - [OpenAI Agents SDK](https://docs.mem0.ai/integrations/openai-agents-sdk) [Platform]: Use when the user is on the OpenAI Agents SDK.
@@ -364,6 +364,11 @@ All API Reference docs describe Mem0 Platform REST endpoints (requires API key).
 ### Entities
 - [Get Users](https://docs.mem0.ai/api-reference/entities/get-users) [Platform]: Use when listing users, agents, or apps known to a project.
 - [Delete User](https://docs.mem0.ai/api-reference/entities/delete-user) [Platform]: Use when removing an entity and all its memories.
+- [Get Profile](https://docs.mem0.ai/api-reference/profiles/get-profile) [Platform]: Use when reading a user's structured profile and branching on its generation status.
+- [Get Profile Settings](https://docs.mem0.ai/api-reference/profiles/get-profile-settings) [Platform]: Use when checking the project's profile schema, instructions, or enabled flag.
+- [Update Profile Settings](https://docs.mem0.ai/api-reference/profiles/update-profile-settings) [Platform]: Use when defining or changing the JSON Schema that shapes profiles for a project.
+- [Generate Profiles](https://docs.mem0.ai/api-reference/profiles/generate-profiles) [Platform]: Use when building profiles now: a sample of ten, or one entity.
+- [Get Generation Job](https://docs.mem0.ai/api-reference/profiles/get-profile-job) [Platform]: Use when checking how far a generation has got, and whether it finished.
 
 ### Organizations
 - [Create Organization](https://docs.mem0.ai/api-reference/organization/create-org) [Platform]: Use when setting up a new org.
