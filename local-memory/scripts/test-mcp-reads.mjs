@@ -41,7 +41,29 @@ async function call(client, name, args = {}) {
   const result = await client.callTool({ name, arguments: args });
   const text = result.content?.[0]?.text ?? "";
   assert.ok(!result.isError, `${name}: ${text}`);
+  if (name === "memory_context" && result.structuredContent) {
+    return { ...result.structuredContent, text };
+  }
   return JSON.parse(text);
+}
+
+async function hookContext(directory) {
+  const child = spawn(process.execPath, [fileURLToPath(new URL("../src/hooks/session-start.mjs", import.meta.url))], {
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, MEM0_LOCAL_HOME: path.join(root, "store"), MEM0_LOCAL_USER_ID: "read-test-user",
+      MEM0_LOCAL_NO_LLM: "1", MEM0_LOCAL_NO_RERANK: "1", MEM0_LOCAL_PROBE: "1" },
+  });
+  let output = "";
+  let errorOutput = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { errorOutput += chunk; });
+  const completed = new Promise((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", (code) => code === 0 ? resolve() : reject(new Error(errorOutput)));
+  });
+  child.stdin.end(JSON.stringify({ workspace_roots: [directory] }));
+  await completed;
+  return JSON.parse(output).additional_context;
 }
 
 async function fails(client, name, args, pattern) {
@@ -65,6 +87,21 @@ try {
   assert.ok(one.getInstructions().includes("memory_context"));
   assert.ok(one.getInstructions().length <= 512);
   assert.ok(!one.getInstructions().includes("Memory protocol for this session:"));
+  const rawEmptyContext = await one.callTool({ name: "memory_context", arguments: {} });
+  assert.ok(!rawEmptyContext.isError);
+  assert.equal(rawEmptyContext.content.length, 1, "context prose is delivered once");
+  assert.equal(rawEmptyContext.content[0].type, "text");
+  assert.match(rawEmptyContext.content[0].text, /^## Local memory.*\n\n/,
+    "the MCP text block contains Markdown with real line breaks, without an inner JSON envelope");
+  assert.deepEqual(Object.keys(rawEmptyContext.structuredContent).sort(), ["count", "project"]);
+  assert.equal(rawEmptyContext.structuredContent.count, 0);
+  const contextSchema = catalog.find((t) => t.name === "memory_context").outputSchema;
+  assert.equal(contextSchema.type, "object");
+  assert.deepEqual(contextSchema.required, ["project", "count"]);
+  assert.equal(contextSchema.properties.project.type, "string");
+  assert.equal(contextSchema.properties.count.type, "integer");
+  assert.equal(contextSchema.properties.count.minimum, 0);
+  assert.equal(contextSchema.additionalProperties, false);
   const emptyContext = await call(one, "memory_context");
   assert.equal(emptyContext.count, 0);
   assert.ok(emptyContext.text.includes("No eligible memories"));
@@ -77,6 +114,7 @@ try {
   assert.equal(added.stored, 1);
   const context = await call(one, "memory_context");
   assert.equal(context.count, 1);
+  assert.ok(context.text.includes("Selected 1 memory. This selection is partial."));
   assert.ok(context.text.includes(original));
   assert.equal(context.project, added.project);
   assert.deepEqual(await call(one, "memory_context"), context, "context can be retrieved again");
@@ -89,6 +127,26 @@ try {
     assert.ok(!tool.description.includes("Memory protocol for this session:"));
   }
   assert.ok((await call(later, "memory_context")).text.includes(original));
+  checks += 1;
+
+  const multiline = String.raw`Context formatting fixture uses "quoted text" and C:\Projects\mem0\src.
+
+Keep the literal \n in documentation; this paragraph starts after a real blank line.`;
+  const formatted = await call(one, "memory_add", { text: multiline, kind: "fact", evidence: "inferred",
+    confidenceReason: "Synthetic low-confidence fixture.", force: true });
+  const rawContext = await one.callTool({ name: "memory_context", arguments: {} });
+  assert.ok(!rawContext.isError);
+  assert.deepEqual(rawContext.structuredContent, { project: added.project, count: 2 });
+  const markdown = rawContext.content[0].text;
+  assert.ok(markdown.includes(`repository \`${added.project}\``), "the full project id is visible in prose");
+  assert.ok(markdown.includes("Selected 2 memories. This selection is partial."));
+  assert.ok(markdown.includes("\n\n### Remembered from earlier sessions\n\n"));
+  assert.ok(markdown.includes(`#### [fact] [evidence=inferred VERIFY] (id: ${formatted.ids[0].slice(0, 8)})\n\n${multiline}`),
+    "metadata precedes prose and quotes, paths, paragraphs and literal escapes survive MCP transport");
+  assert.ok(markdown.includes(`\n\n${original}\n\n`), "memory entries are separated by blank lines");
+  assert.equal(await hookContext(path.join(root, "repo-one")), markdown,
+    "the hook and MCP context tool deliver the same rendered text");
+  await call(one, "memory_delete", { id: formatted.ids[0] });
   checks += 1;
   const record = await call(one, "memory_get", { id: id.slice(0, 8).toUpperCase() });
   assert.equal(record.id, id);

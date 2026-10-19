@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Pins down what a fresh session is actually handed. Both injection channels
- * (Cursor's sessionStart hook and the MCP handshake) share one selection step,
+ * (Cursor's sessionStart hook and the MCP context tool) share one selection step,
  * and every way it loses a memory is silent: an agent that was never told about
  * a convention behaves exactly like one that has no memory layer at all.
  *
@@ -51,7 +51,40 @@ const record = (name, textChars, kind = "note") => ({
 });
 
 const idsIn = (lines) => lines.map((line) => line.match(/\(id: ([^)]+)\)/)?.[1] ?? "?");
-const totalChars = (lines) => lines.reduce((total, line) => total + line.length, 0);
+const totalChars = (lines) => lines.join("\n\n").length;
+
+// Metadata precedes the original prose, including its paragraph breaks and
+// literal backslash escapes. The budget pays for separators between entries.
+const formattedRecords = [
+  { ...record("first", 10, "fact"), id: "abcdef01-0000", text: "First memory." },
+  { ...record("second", 10, "note"), id: "abcdef02-0000", text: "Second memory." },
+];
+const expectedEntries = [
+  "#### [fact] [evidence=stated] (id: abcdef01)\n\nFirst memory.",
+  "#### [note] [evidence=stated] (id: abcdef02)\n\nSecond memory.",
+];
+const exactBudget = expectedEntries.join("\n\n").length;
+const atBoundary = selectInjectionLines(formattedRecords, { recent: 2, maxChars: exactBudget });
+check(
+  "entry headers precede prose and two entries fit their exact rendered budget",
+  atBoundary.join("\n\n") === expectedEntries.join("\n\n"),
+);
+const belowBoundary = selectInjectionLines(formattedRecords, { recent: 2, maxChars: exactBudget - 1 });
+check(
+  "blank lines between entries count toward the character budget",
+  belowBoundary.length === 1 && belowBoundary[0] === expectedEntries[0],
+);
+const paragraphText = String.raw`Formatting preserves "quotes" and C:\Projects\mem0.
+
+Keep the literal \n in this paragraph.`;
+const paragraphEntry = selectInjectionLines(
+  [{ ...formattedRecords[0], text: paragraphText, evidence: "inferred", confidence: 0.4 }],
+  { recent: 1, maxChars: 1000 },
+)[0];
+check(
+  "verification warnings precede unchanged multiline prose",
+  paragraphEntry === `#### [fact] [evidence=inferred VERIFY] (id: abcdef01)\n\n${paragraphText}`,
+);
 
 // --- one long memory must not end the list -----------------------------------
 // The regression this suite exists for: stopping at the first oversized record
@@ -80,17 +113,18 @@ check("the character budget holds", totalChars(tight) <= 450, `${totalChars(tigh
 // Whichever limit binds first wins, so a maxChars too small for `recent`
 // records makes the configured `recent` a number that never happens.
 const { recent, maxChars } = loadConfig().inject;
-// Sized in rendered lines, not in memory text: the `[kind]` prefix and the id
-// suffix are part of what the budget pays for. 625 is the upper end of what
-// this repository's own memories measure, so the shipped budget has headroom.
+// Sized in rendered entries including the separator, not just memory text:
+// metadata headers and blank lines are part of what the budget pays for.
+// 625 is the upper end of what this repository's own memories measure.
 const TYPICAL_LINE = 625;
-const overhead = selectInjectionLines([record("x", 10)], { recent: 1, maxChars: 1000 })[0].length - 10;
+const overhead = selectInjectionLines([record("x", 10)], { recent: 1, maxChars: 1000 })[0].length - 10 + 2;
 const typical = Array.from({ length: recent }, (_, index) => record(`m${index}`, TYPICAL_LINE - overhead));
 const fitted = selectInjectionLines(typical, { recent, maxChars });
+const needed = totalChars(typical.map((entry) => selectInjectionLines([entry], { recent: 1, maxChars: 1000 })[0]));
 check(
   "the shipped budget can hold inject.recent typical memories",
   fitted.length === recent,
-  `${fitted.length} of ${recent} at ${maxChars} chars (${recent * TYPICAL_LINE} needed)`,
+  `${fitted.length} of ${recent} at ${maxChars} chars (${needed} needed)`,
 );
 
 // --- recent still caps the list ----------------------------------------------

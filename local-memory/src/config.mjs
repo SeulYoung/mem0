@@ -242,10 +242,10 @@ export const DEFAULT_CONFIG = {
     recent: 8,
     /**
      * Has to be able to hold `recent` records, or the smaller of the two limits
-     * wins and the other one is a lie. Measured on this repository's own
-     * memories: an injected line runs 400-800 characters (a self-contained
-     * sentence plus the `[kind]` and id it is rendered with), averaging around
-     * 530, so eight of them need this much with a little headroom.
+     * wins and the other one is a lie. Original measurements of this
+     * repository's injected lines were 400-800 characters, averaging around
+     * 530. This budget includes entry headings, prose and separators between
+     * entries; the context heading, selection summary and protocol are extra.
      */
     maxChars: 5000,
     /**

@@ -210,6 +210,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args = {} } = request.params;
   try {
     const result = await runTool(name, args);
+    if (name === "memory_context") {
+      // Context is prose for the agent. Serializing it inside another JSON text
+      // block hides its paragraph breaks; keep structured metadata separate.
+      return {
+        content: [{ type: "text", text: result.text }],
+        structuredContent: { project: result.project, count: result.count },
+      };
+    }
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   } catch (error) {
     log("mcp", `tool ${name} failed: ${error.stack ?? error.message}`);

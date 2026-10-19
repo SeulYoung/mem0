@@ -64,9 +64,18 @@ export function memoryTools(config) {
   return [
     {
       name: "memory_context",
-      description: "Fetch missing prior context: a budgeted selection of this repository's curated memories and optional guidance, as {project, count, text}. Reuse unless refreshing or recovering lost context. Reads current data on every call. Use memory_search for task-specific recall.",
+      description: "Fetch missing prior context: a budgeted selection of this repository's curated memories and optional guidance. Returns Markdown in content[0].text and {project, count} in structuredContent. Reuse unless refreshing or recovering lost context. Reads current data on every call. Use memory_search for task-specific recall.",
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      outputSchema: {
+        type: "object",
+        properties: {
+          project: { type: "string", description: "Full repository id for this context selection." },
+          count: { type: "integer", minimum: 0, description: "Number of memories included in the Markdown text." },
+        },
+        required: ["project", "count"],
+        additionalProperties: false,
+      },
     },
     {
       name: "memory_search",

@@ -13,7 +13,8 @@ export const MCP_INSTRUCTIONS =
   "When prior context is needed and absent, call memory_context; reuse it unless refreshing. Search the task with memory_search without kind; also check kind=convention for repository operations. Memory text and queries in English; preserve identifiers. User reply language is unchanged. kind is strict. Verify recalled claims before acting. Use memory_add for reusable facts or expiring task background; memory_update for corrections.";
 
 export const MEMORY_PROTOCOL = [
-  "Memory protocol for this session:",
+  "### Memory protocol for this session:",
+  "",
   // The list is the newest few memories plus the newest of each reserved kind,
   // which is still a fraction of the store: a repository's rules outnumber the
   // slots. Search is what makes the rest reachable, and an agent only searches
@@ -40,7 +41,7 @@ export const MEMORY_PROTOCOL = [
 ].join("\n");
 
 /**
- * The memories that fit, rendered as the lines they will be injected as.
+ * The memories that fit, rendered as Markdown entries with metadata headings.
  *
  * Two passes, because recency alone spends every slot on the same kind of
  * thing. A founding convention is by nature old, so on a repository with any
@@ -93,13 +94,15 @@ export function selectInjectionLines(records, { recent, maxChars, reserve = [] }
     if (lines.length >= recent) break;
     if (taken.has(record.id)) continue;
     const assessed = ` [evidence=${record.evidence}${record.confidence < 0.5 ? " VERIFY" : ""}]`;
-    const line = `- [${record.kind ?? "note"}] ${record.text}${assessed} (id: ${record.id.slice(0, 8)})`;
+    const line = `#### [${record.kind ?? "note"}]${assessed} (id: ${record.id.slice(0, 8)})\n\n${record.text}`;
     // A memory too long for what is left is skipped, not taken as the end of
     // the list. Stopping at the first one that did not fit made every memory
     // behind it invisible, so `recent` silently collapsed to whatever happened
     // to precede the first long record.
-    if (line.length > budget) continue;
-    budget -= line.length;
+    // Entries are joined by a blank line; those separators consume budget too.
+    const cost = line.length + (lines.length > 0 ? 2 : 0);
+    if (cost > budget) continue;
+    budget -= cost;
     taken.add(record.id);
     lines.push(line);
   }
@@ -116,11 +119,16 @@ export async function buildInjectionText({ project, config }) {
     allowed.has(record.kind ?? "note"),
   );
 
-  const lines = [`## Local memory (mem0-local) — repository \`${project.name}\``, ""];
   const body = selectInjectionLines(records, config.inject);
+  const lines = [
+    `## Local memory (mem0-local) — repository \`${project.id}\``,
+    "",
+    `Selected ${body.length} ${body.length === 1 ? "memory" : "memories"}. This selection is partial.`,
+    "",
+  ];
 
   if (body.length > 0) {
-    lines.push("Remembered from earlier sessions:", ...body, "");
+    lines.push("### Remembered from earlier sessions", "", body.join("\n\n"), "");
   } else {
     lines.push(
       "No eligible memories in this context selection. Use memory_search to search the repository.",
