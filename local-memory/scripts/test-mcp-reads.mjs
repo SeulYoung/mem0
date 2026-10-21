@@ -41,9 +41,7 @@ async function call(client, name, args = {}) {
   const result = await client.callTool({ name, arguments: args });
   const text = result.content?.[0]?.text ?? "";
   assert.ok(!result.isError, `${name}: ${text}`);
-  if (name === "memory_context" && result.structuredContent) {
-    return { ...result.structuredContent, text };
-  }
+  if (name === "memory_context") return { text };
   return JSON.parse(text);
 }
 
@@ -93,17 +91,11 @@ try {
   assert.equal(rawEmptyContext.content[0].type, "text");
   assert.match(rawEmptyContext.content[0].text, /^## Local memory.*\n\n/,
     "the MCP text block contains Markdown with real line breaks, without an inner JSON envelope");
-  assert.deepEqual(Object.keys(rawEmptyContext.structuredContent).sort(), ["count", "project"]);
-  assert.equal(rawEmptyContext.structuredContent.count, 0);
-  const contextSchema = catalog.find((t) => t.name === "memory_context").outputSchema;
-  assert.equal(contextSchema.type, "object");
-  assert.deepEqual(contextSchema.required, ["project", "count"]);
-  assert.equal(contextSchema.properties.project.type, "string");
-  assert.equal(contextSchema.properties.count.type, "integer");
-  assert.equal(contextSchema.properties.count.minimum, 0);
-  assert.equal(contextSchema.additionalProperties, false);
+  assert.equal(rawEmptyContext.structuredContent, undefined,
+    "hosts that forward only structuredContent would otherwise drop the prose");
+  assert.equal(catalog.find((t) => t.name === "memory_context").outputSchema, undefined);
   const emptyContext = await call(one, "memory_context");
-  assert.equal(emptyContext.count, 0);
+  assert.ok(emptyContext.text.includes("Selected 0 memories."));
   assert.ok(emptyContext.text.includes("No eligible memories"));
   assert.ok(emptyContext.text.includes("Memory protocol for this session:"));
   checks += 1;
@@ -113,13 +105,12 @@ try {
   const id = added.ids[0];
   assert.equal(added.stored, 1);
   const context = await call(one, "memory_context");
-  assert.equal(context.count, 1);
   assert.ok(context.text.includes("Selected 1 memory. This selection is partial."));
   assert.ok(context.text.includes(original));
-  assert.equal(context.project, added.project);
+  assert.ok(context.text.includes(`repository \`${added.project}\``));
   assert.deepEqual(await call(one, "memory_context"), context, "context can be retrieved again");
-  assert.equal((await call(two, "memory_context")).count, 0);
-  assert.equal((await call(otherUser, "memory_context")).count, 0);
+  assert.ok((await call(two, "memory_context")).text.includes("Selected 0 memories."));
+  assert.ok((await call(otherUser, "memory_context")).text.includes("Selected 0 memories."));
   const later = await connect(path.join(root, "repo-one"));
   assert.equal(later.getInstructions(), one.getInstructions(), "handshake must not grow with stored memories");
   for (const tool of (await later.listTools()).tools) {
@@ -136,7 +127,7 @@ Keep the literal \n in documentation; this paragraph starts after a real blank l
     confidenceReason: "Synthetic low-confidence fixture.", force: true });
   const rawContext = await one.callTool({ name: "memory_context", arguments: {} });
   assert.ok(!rawContext.isError);
-  assert.deepEqual(rawContext.structuredContent, { project: added.project, count: 2 });
+  assert.equal(rawContext.structuredContent, undefined);
   const markdown = rawContext.content[0].text;
   assert.ok(markdown.includes(`repository \`${added.project}\``), "the full project id is visible in prose");
   assert.ok(markdown.includes("Selected 2 memories. This selection is partial."));
@@ -217,7 +208,7 @@ Keep the literal \n in documentation; this paragraph starts after a real blank l
   checks += 1;
 
   await call(one, "memory_update", { id, expiresAt: "2020-01-01" });
-  assert.equal((await call(one, "memory_context")).count, 0);
+  assert.ok((await call(one, "memory_context")).text.includes("Selected 0 memories."));
   await fails(one, "memory_get", { id }, /No memory.*scope/);
   assert.equal((await call(one, "memory_get", { id, includeExpired: true })).text, corrected);
   assert.equal((await call(two, "memory_get", { id, scope: "all", includeExpired: true })).id, id);
@@ -251,7 +242,7 @@ Keep the literal \n in documentation; this paragraph starts after a real blank l
   const disabled = await connect(path.join(root, "repo-one"), "read-test-user", disabledHome);
   assert.ok(!disabled.getInstructions());
   const explicitContext = await call(disabled, "memory_context");
-  assert.equal(explicitContext.count, 0);
+  assert.ok(explicitContext.text.includes("Selected 0 memories."));
   assert.ok(!explicitContext.text.includes("Memory protocol for this session:"));
   // A store can contain searchable facts even though its curated selection is empty.
   const filteredHome = path.join(root, "filtered-store");
@@ -261,7 +252,7 @@ Keep the literal \n in documentation; this paragraph starts after a real blank l
   const filtered = await connect(path.join(root, "repo-one"), "read-test-user", filteredHome);
   const filteredWrite = await call(filtered, "memory_add", { text: original, kind: "fact" });
   const filteredContext = await call(filtered, "memory_context");
-  assert.equal(filteredContext.count, 0);
+  assert.ok(filteredContext.text.includes("Selected 0 memories."));
   assert.ok(filteredContext.text.includes("No eligible memories"));
   assert.ok(!filteredContext.text.includes("No memories stored"));
   assert.ok((await call(filtered, "memory_search", searchArgs)).results.some((r) => r.id === filteredWrite.ids[0]));

@@ -105,26 +105,24 @@ node scripts/test-hooks.mjs D:\UGit\HappyArenaTMR\HappyArena
 
 | 工具 | 参数与返回 |
 | --- | --- |
-| `memory_context` | 无参数，`content[0].text` 直接返回 Markdown，`structuredContent` 返回 `{project, count}`。当前仓库的近期精选记忆和可选完整指导；每次调用重新读取，受 recent、maxChars、kinds、reserve 和 includeProtocol 配置约束 |
+| `memory_context` | 无参数，`content[0].text` 直接返回 Markdown，不返回 `structuredContent`。当前仓库的近期精选记忆和可选完整指导；每次调用重新读取，受 recent、maxChars、kinds、reserve 和 includeProtocol 配置约束 |
 | `memory_get` | `id` 必填，支持完整 ID 或无歧义前缀；`scope` 默认 project，可显式 all；`includeExpired` 默认 false。直接返回当前记录，不做语义搜索 |
 | `memory_history` | `id` 必填；`limit` 默认 10，范围 1–50。返回 `{record, truncated, entries}`，正文历史从新到旧；更多历史使用 CLI `history <id>` |
 | `memory_search` 的 `explain` | 默认 false；true 时各结果增加 `scoreDetails`，展示语义、BM25 和实体贡献，不改变排序 |
 
 缺少历史背景时先以 `{}` 调用 `memory_context`，已有结果就复用；需要刷新或上下文压缩后丢失时可以重新调用。它不是任务检索，不取代 `memory_search`，也不保证 AI 一定执行。所有 MCP 宿主使用同一种短 instructions，不提供完整握手注入的兼容模式。
 
-上下文正文包含完整项目 ID、实际选择条数、独立的记忆和指导标题。每条记忆先列类别、证据等级与短 ID，低可信条目的 `VERIFY` 放在正文前；条目以空行分隔，原文中的段落、引号、路径和字面量 `\n` 保持不变。正文只出现在 `content[0].text` 一处，结构化元数据不重复正文。MCP 传输仍使用 JSON，日志面板可能显示转义；解析 MCP 响应后，正文自身已包含真实换行，不需要再次解析 JSON。
+上下文正文包含完整项目 ID、实际选择条数、独立的记忆和指导标题。每条记忆先列类别、证据等级与短 ID，低可信条目的 `VERIFY` 放在正文前；条目以空行分隔，原文中的段落、引号、路径和字面量 `\n` 保持不变。正文只出现在 `content[0].text` 一处。MCP 传输仍使用 JSON，日志面板可能显示转义；解析 MCP 响应后，正文自身已包含真实换行，不需要再次解析 JSON。
 
-旧客户端如果执行 `JSON.parse(response.content[0].text)`，需要改为读取 Markdown 和 `response.structuredContent`。兼容新旧服务的读取方式可以写成：
+不返回 `structuredContent` 和 `outputSchema` 是有意的：Claude Code 在结果带 `structuredContent` 时只把该字段交给模型，正文会被丢弃，模型只看到 `{project, count}`。项目 ID 和条数已写在正文开头。旧客户端如果执行 `JSON.parse(response.content[0].text)` 或读取 `response.structuredContent`，需要改为直接读取 Markdown：
 
 ```js
 const response = await client.callTool({ name: "memory_context", arguments: {} });
 if (response.isError) throw new Error(response.content[0].text);
-const context = response.structuredContent
-  ? { ...response.structuredContent, text: response.content[0].text }
-  : JSON.parse(response.content[0].text);
+const markdown = response.content[0].text;
 ```
 
-`memory_context` 在 tools/list 中声明 `{project, count}` 的 `outputSchema`。重新连接 MCP 服务后加载新的返回格式与工具描述；其他记忆工具继续使用原有 JSON 文本返回。
+重新连接 MCP 服务后加载新的返回格式与工具描述；其他记忆工具继续使用原有 JSON 文本返回。
 
 例如调用 `memory_search` 时传入：
 

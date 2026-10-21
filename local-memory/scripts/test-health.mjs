@@ -46,9 +46,16 @@ process.stdout.write("\n== change detection\n");
 check("an unchanged environment is quiet", describeChanges(current, current).length === 0);
 const abiBump = describeChanges({ ...current, abi: "115", nodeVersion: "v20.11.0" }, current);
 check("an ABI bump is reported", abiBump.some((line) => line.startsWith("node ABI")), abiBump.join("; "));
+// A fixture file, not ~/.cursor/mcp.json: on a machine without Cursor the real
+// entry is already "absent", and comparing it with "absent" proves nothing.
+const mcpFixture = path.join(os.tmpdir(), `mem0-mcp-test-${process.pid}.json`);
+fs.writeFileSync(mcpFixture, JSON.stringify({ mcpServers: { "mem0-local": { command: "node", args: ["server.mjs"] } } }));
+const registered = fingerprint({ mcpFile: mcpFixture });
+fs.rmSync(mcpFixture, { force: true });
+check("a registered entry is hashed", /^[0-9a-f]{12}$/.test(registered.mcpEntry), registered.mcpEntry);
 check(
   "losing the mcp.json entry is reported",
-  describeChanges({ ...current, mcpEntry: "absent" }, current).some((line) => line.includes("mcp.json")),
+  describeChanges(registered, fingerprint({ mcpFile: mcpFixture })).some((line) => line.includes("mcp.json")),
 );
 check(
   "a moved executable alone still reports once",

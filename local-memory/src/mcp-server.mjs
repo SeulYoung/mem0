@@ -212,11 +212,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const result = await runTool(name, args);
     if (name === "memory_context") {
       // Context is prose for the agent. Serializing it inside another JSON text
-      // block hides its paragraph breaks; keep structured metadata separate.
-      return {
-        content: [{ type: "text", text: result.text }],
-        structuredContent: { project: result.project, count: result.count },
-      };
+      // block hides its paragraph breaks. No structuredContent either: Claude Code
+      // hands the model only that field when present, which dropped the prose.
+      return { content: [{ type: "text", text: result.text }] };
     }
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   } catch (error) {

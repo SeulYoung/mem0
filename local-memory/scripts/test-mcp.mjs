@@ -46,9 +46,7 @@ const call = async (name, args = {}) => {
   const response = await client.callTool({ name, arguments: args });
   const text = response.content?.[0]?.text ?? "";
   if (response.isError) throw new Error(`${name} returned an error: ${text}`);
-  if (name === "memory_context" && response.structuredContent) {
-    return { ...response.structuredContent, text };
-  }
+  if (name === "memory_context") return { text };
   try {
     return JSON.parse(text);
   } catch {
@@ -142,9 +140,7 @@ const laterClient = await connect();
 const laterInstructions = laterClient.getInstructions() ?? "";
 const laterContextResponse = await laterClient.callTool({ name: "memory_context", arguments: {} });
 if (laterContextResponse.isError) throw new Error("memory_context failed");
-const laterContext = laterContextResponse.structuredContent
-  ? { ...laterContextResponse.structuredContent, text: laterContextResponse.content[0].text }
-  : JSON.parse(laterContextResponse.content[0].text);
+const laterContext = { text: laterContextResponse.content[0].text };
 await laterClient.close();
 show("context carries the new memory", laterContext.text.includes("local-memory 目录"));
 if (laterInstructions !== instructions || !laterContext.text.includes("local-memory 目录")) {
